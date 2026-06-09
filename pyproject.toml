@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "termcoder"
+version = "0.1.0"
+description = "Privacy-first, terminal-native agentic coding assistant (Phase 1 MVP)."
+readme = "README.md"
+requires-python = ">=3.13"
+license = { text = "Apache-2.0" }
+authors = [{ name = "termcoder contributors" }]
+dependencies = [
+    "litellm>=1.55,<2",
+    "pydantic>=2.7",
+    "prompt_toolkit>=3.0",
+    "rich>=13.7",
+    "typer>=0.12",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+termcoder = "termcoder.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/termcoder"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
