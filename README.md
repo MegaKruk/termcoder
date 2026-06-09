@@ -29,7 +29,7 @@ arrives in a later phase; the tool interface stays the same.
 
 ## Requirements
 
-- Python 3.13 or newer.
+- Python 3.14 or newer.
 - One model backend:
   - Local (default, recommended for privacy): Ollama running with a
     tool-capable model. For example:

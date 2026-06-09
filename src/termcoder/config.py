@@ -120,7 +120,7 @@ def default_models() -> dict[str, ModelConfig]:
     return {
         "ollama": ModelConfig(
             name="ollama",
-            model="ollama_chat/llama3.1",
+            model="ollama_chat/devstral",
             api_base="http://localhost:11434",
             context_window=8192,
         ),
