@@ -25,6 +25,7 @@ from pydantic import BaseModel, ValidationError
 
 from ..approval.types import ApprovalRequest, Approver
 from ..errors import ToolError
+from ..snapshots.store import NullSnapshotStore, SnapshotStore
 from ..workspace.paths import WorkspaceGuard
 
 
@@ -43,6 +44,7 @@ class ToolContext:
     workspace: WorkspaceGuard
     approver: Approver
     emit: Callable[[str], None] = _noop_emit
+    snapshots: SnapshotStore | NullSnapshotStore = field(default_factory=NullSnapshotStore)
 
 
 @dataclass
@@ -82,6 +84,7 @@ class ToolPreview:
     detail_kind: str = "text"
     destructive: bool = False
     skip_approval: bool = False
+    note: str | None = None
     payload: dict = field(default_factory=dict)
 
 
@@ -156,6 +159,7 @@ class MutatingTool(Tool):
             detail=preview.detail,
             detail_kind=preview.detail_kind,
             destructive=preview.destructive,
+            note=preview.note,
         )
         outcome = context.approver.request(request)
         if not outcome.approved:

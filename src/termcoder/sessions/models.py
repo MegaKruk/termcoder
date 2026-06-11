@@ -18,6 +18,8 @@ class SessionMeta:
     created_at: str
     updated_at: str
     model: str
+    summary: str | None = None
+    summary_through: int = 0
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -30,4 +32,6 @@ class SessionMeta:
             created_at=data["created_at"],
             updated_at=data.get("updated_at", data["created_at"]),
             model=data.get("model", "unknown"),
+            summary=data.get("summary"),
+            summary_through=int(data.get("summary_through", 0)),
         )

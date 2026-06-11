@@ -14,6 +14,8 @@ from rich.console import Console
 from rich.syntax import Syntax
 
 from ..approval.types import ApprovalRequest
+from ..context.compaction import CompactionResult
+from ..snapshots.store import UndoResult
 from ..tools.base import ToolResult
 
 _ARGS_PREVIEW_LIMIT = 200
@@ -38,11 +40,13 @@ class Renderer:
     def console(self) -> Console:
         return self._console
 
-    def banner(self, workspace: Path, model_name: str) -> None:
+    def banner(self, workspace: Path, model_name: str, sandbox: str | None = None) -> None:
         """Show the startup banner."""
         self._console.rule("termcoder")
         self._console.print(f"workspace: {workspace}", style="dim")
         self._console.print(f"model: {model_name}", style="dim")
+        if sandbox:
+            self._console.print(f"sandbox: {sandbox}", style="dim")
         self._console.print(
             "Type a message, or /help for commands. Ctrl-D to exit.", style="dim"
         )
@@ -92,14 +96,44 @@ class Renderer:
         style = "green" if result.ok else "red"
         self._console.print(f"  [tool] {name}: {summary}", style=style, markup=False)
 
+    def compacted(self, result: CompactionResult) -> None:
+        """Note that the conversation was compacted to save context space."""
+        self._console.print(
+            f"  [context] compacted {result.summarized_turns} earlier turn(s), "
+            f"about {result.before_tokens} -> {result.after_tokens} tokens.",
+            style="dim",
+            markup=False,
+        )
+
+    def undone(self, result: UndoResult | None) -> None:
+        """Report the outcome of an undo request."""
+        if result is None:
+            self.info("There is nothing to undo.")
+            return
+        counts = []
+        if result.restored:
+            counts.append(f"restored {len(result.restored)}")
+        if result.deleted:
+            counts.append(f"removed {len(result.deleted)}")
+        if result.skipped:
+            counts.append(f"skipped {len(result.skipped)}")
+        summary = ", ".join(counts) if counts else "no files affected"
+        self.info(f"Undid '{result.label}': {summary}.")
+        for path in result.restored:
+            self.tool_progress(f"restored {path}")
+        for path in result.deleted:
+            self.tool_progress(f"removed {path}")
+        for path in result.skipped:
+            self.tool_progress(f"skipped {path} (could not restore)")
+
     def render_approval(self, request: ApprovalRequest) -> None:
         """Show what is about to happen so the user can decide."""
         self._console.print()
         self._console.print(f"Approval needed: {request.summary}", style="bold")
         if request.detail:
             self._render_detail(request)
-        if request.destructive:
-            self.warning("This action changes your system and cannot be auto-undone.")
+        if request.note:
+            self.warning(request.note)
 
     def _render_detail(self, request: ApprovalRequest) -> None:
         if request.detail_kind == "diff":
@@ -109,9 +143,6 @@ class Renderer:
         elif request.detail_kind == "command":
             self._console.print(
                 Syntax(request.detail, "bash", theme="ansi_dark", word_wrap=True)
-            )
-            self.warning(
-                "This command runs on your host with no sandbox in this phase."
             )
         else:
             self._console.print(request.detail, markup=False)

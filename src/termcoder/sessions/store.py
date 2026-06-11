@@ -84,6 +84,12 @@ class Session:
         self._meta.model = model
         self._write_meta()
 
+    def set_summary(self, summary: str, through: int) -> None:
+        """Store a compaction summary covering the leading ``through`` messages."""
+        self._meta.summary = summary
+        self._meta.summary_through = through
+        self._write_meta()
+
     def _write_meta(self) -> None:
         self._meta_path.write_text(
             json.dumps(self._meta.to_dict(), ensure_ascii=True, indent=2),

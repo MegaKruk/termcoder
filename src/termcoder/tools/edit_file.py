@@ -107,6 +107,7 @@ class EditFileTool(MutatingTool):
                 content="No changes were necessary.", ok=True, display="no change"
             )
         path = Path(preview.payload["path"])
+        context.snapshots.capture(path)
         path.write_text(preview.payload["new"], encoding="utf-8")
         return ToolResult(
             content=f"Edited {context.workspace.relative(path)}.",

@@ -53,6 +53,7 @@ class WriteFileTool(MutatingTool):
                 content="No changes were necessary.", ok=True, display="no change"
             )
         path = Path(preview.payload["path"])
+        context.snapshots.capture(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(args.content, encoding="utf-8")
         return ToolResult(

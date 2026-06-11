@@ -8,6 +8,7 @@ web search, MCP-backed tools) here or alongside this function.
 from __future__ import annotations
 
 from ..config import AppConfig
+from ..sandbox.runner import CommandRunner, build_command_runner
 from .base import (
     MutatingTool,
     ReadOnlyTool,
@@ -42,8 +43,15 @@ __all__ = [
 ]
 
 
-def build_default_registry(config: AppConfig) -> ToolRegistry:
-    """Create a registry with the standard Phase 1 tool set."""
+def build_default_registry(
+    config: AppConfig, command_runner: CommandRunner | None = None
+) -> ToolRegistry:
+    """Create a registry with the standard tool set.
+
+    The run_command tool is wired to a command runner. When one is not provided,
+    it is built from the sandbox configuration, so the same call works in tests
+    and at runtime.
+    """
     registry = ToolRegistry()
     registry.register(ReadFileTool())
     registry.register(ListDirectoryTool())
@@ -51,5 +59,6 @@ def build_default_registry(config: AppConfig) -> ToolRegistry:
     registry.register(WriteFileTool())
     registry.register(EditFileTool())
     if config.allow_run_command:
-        registry.register(RunCommandTool())
+        runner = command_runner or build_command_runner(config.sandbox, config.workspace)
+        registry.register(RunCommandTool(runner=runner))
     return registry

@@ -1,9 +1,10 @@
 """The interactive read-eval-print loop.
 
 This module wires the pieces together: configuration, the model client, the
-workspace guard, the tool registry, the session store, the approver and the
-agent. It also handles slash commands. It is the one place that knows about all
-the parts, which keeps every other module small and independent.
+workspace guard, the tool registry with its command runner, the session store,
+the snapshot store, the context manager, the approver and the agent. It also
+handles slash commands. It is the one place that knows about all the parts,
+which keeps every other module small and independent.
 """
 
 from __future__ import annotations
@@ -16,9 +17,12 @@ from prompt_toolkit.history import FileHistory
 from ..agent.loop import Agent
 from ..agent.system_prompt import build_system_prompt
 from ..config import AppConfig
+from ..context import ContextManager, TokenCounter
 from ..errors import ConfigError, ProviderError, TermcoderError
 from ..providers.llm_client import LLMClient
+from ..sandbox.runner import build_command_runner
 from ..sessions.store import SessionStore
+from ..snapshots.store import NullSnapshotStore, SnapshotStore
 from ..tools import build_default_registry
 from ..tools.base import ToolContext
 from ..workspace.paths import WorkspaceGuard
@@ -26,14 +30,16 @@ from .approver import ConsoleApprover
 from .renderer import Renderer
 
 _HELP = """Commands:
-  /help            Show this help.
-  /new             Start a new chat session.
-  /sessions        List chat sessions for this workspace.
-  /resume <id>     Resume a previous session by id.
-  /model [name]    Show the active model, or switch to another configured one.
-  /tools           List the available tools.
-  /clear           Clear the screen.
-  /exit, /quit     Leave termcoder.
+  /help                Show this help.
+  /new                 Start a new chat session.
+  /sessions            List chat sessions for this workspace.
+  /resume <id>         Resume a previous session by id.
+  /model [name]        Show the active model, or switch to another configured one.
+  /compact [focus]     Summarize older turns now to free context space.
+  /undo                Revert the file changes from the most recent turn.
+  /tools               List the available tools.
+  /clear               Clear the screen.
+  /exit, /quit         Leave termcoder.
 """
 
 
@@ -49,20 +55,28 @@ class Repl:
         self._approver = ConsoleApprover(self._renderer)
         self._store = SessionStore(config.sessions_dir)
         self._workspace = WorkspaceGuard(config.workspace)
-        self._tools = build_default_registry(config)
+        self._runner = build_command_runner(config.sandbox, config.workspace)
+        self._tools = build_default_registry(config, command_runner=self._runner)
         self._context = ToolContext(
             workspace=self._workspace,
             approver=self._approver,
             emit=self._renderer.tool_progress,
+            snapshots=NullSnapshotStore(),
         )
 
         self._llm = self._build_client()
+        self._token_counter = TokenCounter()
+        self._context_manager = self._build_context_manager()
         self._session = self._store.create(model=config.active_model)
+        self._snapshots = self._build_snapshots()
+        self._context.snapshots = self._snapshots
         self._agent = self._build_agent()
 
     def run(self) -> None:
         """Start the main input loop."""
-        self._renderer.banner(self._config.workspace, self._llm.model_name)
+        self._renderer.banner(
+            self._config.workspace, self._llm.model_name, sandbox=self._sandbox_label()
+        )
         while True:
             try:
                 line = self._prompt.prompt("you> ")
@@ -94,8 +108,29 @@ class Repl:
         except KeyboardInterrupt:
             self._renderer.warning("Interrupted this turn.")
 
+    def _sandbox_label(self) -> str:
+        if self._runner.is_sandboxed:
+            return f"{self._runner.backend} container"
+        return "host (no sandbox)"
+
     def _build_client(self) -> LLMClient:
         return LLMClient(self._config.model(), stream=self._config.stream)
+
+    def _build_context_manager(self) -> ContextManager:
+        settings = self._config.context
+        return ContextManager(
+            auto_compact=settings.auto_compact,
+            compact_threshold=settings.compact_threshold,
+            keep_recent_turns=settings.keep_recent_turns,
+            context_window=self._config.model().context_window,
+            token_counter=self._token_counter,
+        )
+
+    def _build_snapshots(self):
+        if not self._config.enable_undo:
+            return NullSnapshotStore()
+        root = self._config.snapshots_dir / self._session.meta.id
+        return SnapshotStore(root, self._workspace)
 
     def _build_agent(self) -> Agent:
         prompt = build_system_prompt(
@@ -109,7 +144,14 @@ class Repl:
             ui=self._renderer,
             system_prompt=prompt,
             max_iterations=self._config.max_tool_iterations,
+            context_manager=self._context_manager,
         )
+
+    def _rebind_session(self) -> None:
+        """Refresh per-session state after the active session changes."""
+        self._snapshots = self._build_snapshots()
+        self._context.snapshots = self._snapshots
+        self._agent = self._build_agent()
 
     def _handle_command(self, line: str) -> bool:
         parts = line.split(maxsplit=1)
@@ -128,6 +170,10 @@ class Repl:
             self._cmd_resume(argument)
         elif command == "/model":
             self._cmd_model(argument)
+        elif command == "/compact":
+            self._cmd_compact(argument)
+        elif command == "/undo":
+            self._cmd_undo()
         elif command == "/tools":
             self._cmd_tools()
         elif command == "/clear":
@@ -138,7 +184,7 @@ class Repl:
 
     def _cmd_new(self) -> None:
         self._session = self._store.create(model=self._config.active_model)
-        self._agent = self._build_agent()
+        self._rebind_session()
         self._renderer.info(f"Started a new session ({self._session.meta.id}).")
 
     def _cmd_sessions(self) -> None:
@@ -161,7 +207,7 @@ class Repl:
         except FileNotFoundError as exc:
             self._renderer.error(str(exc))
             return
-        self._agent = self._build_agent()
+        self._rebind_session()
         self._renderer.info(
             f"Resumed session {self._session.meta.id} "
             f"({len(self._session.messages)} messages)."
@@ -179,9 +225,31 @@ class Repl:
             self._renderer.error(str(exc))
             return
         self._llm = self._build_client()
+        self._context_manager = self._build_context_manager()
         self._session.set_model(name)
         self._agent = self._build_agent()
         self._renderer.info(f"Switched to model '{name}'.")
+
+    def _cmd_compact(self, instructions: str) -> None:
+        try:
+            result = self._context_manager.force_compact(
+                self._session, self._llm, instructions or None
+            )
+        except ProviderError as exc:
+            self._renderer.error(str(exc))
+            return
+        if result is None:
+            self._renderer.info("Nothing to compact yet.")
+            return
+        self._renderer.compacted(result)
+
+    def _cmd_undo(self) -> None:
+        if not self._config.enable_undo:
+            self._renderer.warning(
+                "Undo is turned off in configuration (set enable_undo = true)."
+            )
+            return
+        self._renderer.undone(self._snapshots.undo_last())
 
     def _cmd_tools(self) -> None:
         for tool in self._tools:

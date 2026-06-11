@@ -1,15 +1,18 @@
 # termcoder
 
-A privacy-first, terminal-native agentic coding assistant. This repository
-contains the Phase 1 MVP: an interactive chat REPL with a single agent loop, a
-small set of file and shell tools, strict workspace confinement, diff-based
-approval for every change, and per-chat history stored as plain text.
+A privacy-first, terminal-native agentic coding assistant. It is an interactive
+chat REPL with a single agent loop, a small set of file and shell tools, strict
+workspace confinement, diff-based approval for every change, per-chat history
+stored as plain text, a sandbox for shell commands, automatic conversation
+compaction, and undo for file edits.
 
 termcoder is built to run fully locally against an Ollama model so no code or
 prompt leaves your machine. Cloud models are optional and only activate when
 you set the matching API key.
 
-## What Phase 1 includes
+## What is included
+
+Core assistant:
 
 - Interactive REPL built on prompt_toolkit and Rich.
 - A single agent loop over LiteLLM that works with local Ollama models and
@@ -23,9 +26,22 @@ you set the matching API key.
   whole session, or reject with feedback.
 - Per-chat sessions saved as JSON Lines, with resume support.
 
-There is no sandbox yet. Shell commands run on the host, which is why they
-always require explicit approval and show a warning. Sandboxed execution
-arrives in a later phase; the tool interface stays the same.
+Safety and context:
+
+- Sandboxed shell execution. By default run_command runs inside an ephemeral,
+  rootless Podman container (Docker is a fallback). The container drops all
+  capabilities, disables new privileges, has no network unless you opt in, and
+  is limited in memory, CPU and process count. The workspace is mounted so
+  edits and build output are visible on the host. If no container engine is
+  available, commands run on the host and the approval prompt says so.
+- Token counting and automatic compaction. As a session approaches the model's
+  context window, older turns are summarized and recent turns are kept verbatim.
+  The full transcript on disk is never altered; the summary is folded into the
+  system prompt at request time. Compact on demand with /compact.
+- File snapshots and undo. The file changes from each turn are captured, so
+  /undo reverts the most recent turn: prior contents are restored and files the
+  agent newly created are removed. Note that run_command effects are not
+  snapshotted, since a command can change anything.
 
 ## Requirements
 
@@ -40,6 +56,13 @@ arrives in a later phase; the tool interface stays the same.
   - Cloud (optional): set `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`.
 - Optional: ripgrep (`rg`) on your PATH for faster search. Without it, a
   built-in Python scanner is used.
+- Optional but recommended: a rootless container engine for the command
+  sandbox. Rootless Podman is the default; Docker also works. Pull the sandbox
+  image once (for example `podman pull python:3.14-slim`) or enable network for
+  the engine so it can pull on first use. Without an engine, commands run on the
+  host.
+- Optional: tiktoken for a closer token estimate used by compaction. Without it,
+  a character-based estimate is used. Install with `pip install -e ".[tokenizers]"`.
 
 ## Install
 
@@ -86,6 +109,8 @@ python -m termcoder
 /sessions        List chat sessions for this workspace.
 /resume <id>     Resume a previous session by id.
 /model [name]    Show or switch the active model.
+/compact [focus] Summarize older turns now to free context space.
+/undo            Revert the file changes from the most recent turn.
 /tools           List the available tools.
 /clear           Clear the screen.
 /exit, /quit     Leave termcoder.
@@ -96,8 +121,9 @@ python -m termcoder
 Settings are optional and live in `.termcoder/config.toml` inside the
 workspace. Anything you do not set falls back to a sensible default, and the
 default model is local Ollama. See `.termcoder/config.example.toml` for the
-available keys, including how to define extra models and how to turn the
-run_command tool off entirely.
+available keys, including how to define extra models, choose the sandbox
+backend and image, allow command network access, tune compaction thresholds,
+and turn the run_command tool or undo off entirely.
 
 API keys are never stored in the config file. The config only names the
 environment variable that holds each key.
@@ -112,6 +138,14 @@ pytest
 The test suite runs offline. It does not require any model, API key, or network
 access, and does not import the model provider layer.
 
+## E2E Test
+To run end-to-end test (example):
+
+```
+export OPENAI_API_KEY=sk-proj-...
+termcoder chat -w /home/megakruk/workspace/python/termcoder-sandbox -m gpt
+```
+
 ## Project layout
 
 ```
@@ -121,6 +155,9 @@ src/termcoder/
   workspace/       Path validation that confines all file access.
   approval/        Approval types and unified diff generation (no UI code).
   tools/           The tool framework and the built-in tools.
+  sandbox/         Command runners: host and rootless container, with a factory.
+  context/         Token counting and conversation compaction.
+  snapshots/       File snapshots and undo.
   llm/             Chat message helpers.
   providers/       LiteLLM client and setup (the only place LiteLLM is used).
   sessions/        Per-chat JSON Lines storage.
@@ -129,6 +166,7 @@ src/termcoder/
   cli.py           The command-line entry point.
 ```
 
-This structure leaves clear seams for later phases: sandboxed execution under
-`tools`, context compaction alongside `sessions`, a repository map and web
-search as new modules, and MCP and sub-agents as additional tool sources.
+This structure leaves clear seams for later phases. The sandbox exposes a single
+runner protocol, so a stronger isolation tier (such as a microVM) can be added
+without touching the tool. A repository map and web search slot in as new
+modules, and MCP and sub-agents as additional tool sources.

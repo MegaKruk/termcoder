@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "termcoder"
-version = "0.1.0"
-description = "Privacy-first, terminal-native agentic coding assistant (Phase 1 MVP)."
+version = "0.2.0"
+description = "Privacy-first, terminal-native agentic coding assistant."
 readme = "README.md"
 requires-python = ">=3.14"
 license = { text = "Apache-2.0" }
@@ -20,6 +20,10 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+# Optional: a closer token estimate for compaction. termcoder falls back to a
+# character-based estimate when tiktoken is not installed, so this is not
+# required.
+tokenizers = ["tiktoken>=0.7"]
 
 [project.scripts]
 termcoder = "termcoder.cli:app"

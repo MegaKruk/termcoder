@@ -18,6 +18,7 @@ from .errors import ConfigError
 CONFIG_DIRNAME = ".termcoder"
 CONFIG_FILENAME = "config.toml"
 SESSIONS_DIRNAME = "sessions"
+SNAPSHOTS_DIRNAME = "snapshots"
 HISTORY_FILENAME = "repl_history"
 
 
@@ -60,6 +61,33 @@ class ModelConfig:
 
 
 @dataclass(frozen=True)
+class SandboxSettings:
+    """Settings for running agent commands inside a sandbox container.
+
+    ``backend`` is one of 'auto', 'podman', 'docker' or 'host'. With 'auto', a
+    container engine is used when available and the host is the last resort.
+    Network access is off by default so commands cannot reach out unless the
+    user opts in (for example to install packages).
+    """
+
+    backend: str = "auto"
+    image: str = "python:3.14-slim"
+    network: bool = False
+    memory: str = "1g"
+    cpus: float = 2.0
+    pids_limit: int = 256
+
+
+@dataclass(frozen=True)
+class ContextSettings:
+    """Settings for token budgeting and conversation compaction."""
+
+    auto_compact: bool = True
+    compact_threshold: float = 0.8
+    keep_recent_turns: int = 3
+
+
+@dataclass(frozen=True)
 class AppConfig:
     """Top-level runtime configuration for a single workspace."""
 
@@ -70,6 +98,9 @@ class AppConfig:
     stream: bool = True
     max_tool_iterations: int = 25
     allow_run_command: bool = True
+    enable_undo: bool = True
+    sandbox: SandboxSettings = field(default_factory=SandboxSettings)
+    context: ContextSettings = field(default_factory=ContextSettings)
 
     def model(self) -> ModelConfig:
         """Return the currently selected model configuration."""
@@ -97,12 +128,20 @@ class AppConfig:
             stream=self.stream,
             max_tool_iterations=self.max_tool_iterations,
             allow_run_command=self.allow_run_command,
+            enable_undo=self.enable_undo,
+            sandbox=self.sandbox,
+            context=self.context,
         )
 
     @property
     def sessions_dir(self) -> Path:
         """Directory holding per-chat session files for this workspace."""
         return self.config_dir / SESSIONS_DIRNAME
+
+    @property
+    def snapshots_dir(self) -> Path:
+        """Directory holding file snapshots used for undo."""
+        return self.config_dir / SNAPSHOTS_DIRNAME
 
     @property
     def history_path(self) -> Path:
@@ -120,7 +159,7 @@ def default_models() -> dict[str, ModelConfig]:
     return {
         "ollama": ModelConfig(
             name="ollama",
-            model="ollama_chat/devstral",
+            model="ollama_chat/llama3.1",
             api_base="http://localhost:11434",
             context_window=8192,
         ),
@@ -155,6 +194,29 @@ def _model_from_toml(name: str, raw: dict, fallback: ModelConfig | None) -> Mode
     )
 
 
+def _sandbox_from_toml(raw: dict) -> SandboxSettings:
+    """Build SandboxSettings from a TOML table, falling back to defaults."""
+    base = SandboxSettings()
+    return SandboxSettings(
+        backend=str(raw.get("backend", base.backend)),
+        image=str(raw.get("image", base.image)),
+        network=bool(raw.get("network", base.network)),
+        memory=str(raw.get("memory", base.memory)),
+        cpus=float(raw.get("cpus", base.cpus)),
+        pids_limit=int(raw.get("pids_limit", base.pids_limit)),
+    )
+
+
+def _context_from_toml(raw: dict) -> ContextSettings:
+    """Build ContextSettings from a TOML table, falling back to defaults."""
+    base = ContextSettings()
+    return ContextSettings(
+        auto_compact=bool(raw.get("auto_compact", base.auto_compact)),
+        compact_threshold=float(raw.get("compact_threshold", base.compact_threshold)),
+        keep_recent_turns=int(raw.get("keep_recent_turns", base.keep_recent_turns)),
+    )
+
+
 def load_config(workspace: Path, model_override: str | None = None) -> AppConfig:
     """Load configuration for a workspace, merging file settings over defaults.
 
@@ -186,4 +248,7 @@ def load_config(workspace: Path, model_override: str | None = None) -> AppConfig
         stream=bool(data.get("stream", True)),
         max_tool_iterations=int(data.get("max_tool_iterations", 25)),
         allow_run_command=bool(data.get("allow_run_command", True)),
+        enable_undo=bool(data.get("enable_undo", True)),
+        sandbox=_sandbox_from_toml(data.get("sandbox") or {}),
+        context=_context_from_toml(data.get("context") or {}),
     )

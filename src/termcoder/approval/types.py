@@ -30,6 +30,7 @@ class ApprovalRequest:
     detail: str | None = None
     detail_kind: str = "text"  # one of: "text", "diff", "command"
     destructive: bool = False
+    note: str | None = None
 
 
 @dataclass
