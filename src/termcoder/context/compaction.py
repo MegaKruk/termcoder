@@ -61,7 +61,14 @@ def _render_transcript(messages: list[dict]) -> str:
 
 
 class ContextManager:
-    """Builds the working context and compacts it when it grows too large."""
+    """Builds the working context and compacts it when it grows too large.
+
+    The manager owns its summarizer client. That keeps the call sites simple
+    and lets the summarizer be a different, cheaper model than the active one:
+    the summarization request carries the whole region being folded away, so it
+    is the largest single prompt termcoder ever sends. With no summarizer the
+    manager still tracks sizes but cannot compact.
+    """
 
     def __init__(
         self,
@@ -69,12 +76,14 @@ class ContextManager:
         compact_threshold: float,
         keep_recent_turns: int,
         context_window: int | None,
+        summarizer=None,
         token_counter: TokenCounter | None = None,
     ):
         self._auto_compact = auto_compact
         self._threshold = compact_threshold
         self._keep_recent_turns = max(1, keep_recent_turns)
         self._context_window = context_window
+        self._summarizer = summarizer
         self._tokens = token_counter or TokenCounter()
 
     def summary_text(self, session: Session) -> str | None:
@@ -94,7 +103,7 @@ class ContextManager:
         total += self._tokens.count_messages(self.tail_messages(session))
         return total
 
-    def maybe_compact(self, session: Session, llm) -> CompactionResult | None:
+    def maybe_compact(self, session: Session) -> CompactionResult | None:
         """Compact automatically if enabled and the budget is exceeded."""
         if not self._auto_compact or not self._context_window:
             return None
@@ -102,23 +111,25 @@ class ContextManager:
         if self.estimate_tokens(session) <= budget:
             return None
         try:
-            return self._compact(session, llm, instructions=None)
+            return self._compact(session, instructions=None)
         except ProviderError:
             return None
 
     def force_compact(
-        self, session: Session, llm, instructions: str | None = None
+        self, session: Session, instructions: str | None = None
     ) -> CompactionResult | None:
         """Compact on demand, regardless of the current size.
 
         Unlike the automatic path, provider errors are allowed to propagate so
         the caller can report that a manual compaction failed.
         """
-        return self._compact(session, llm, instructions=instructions)
+        return self._compact(session, instructions=instructions)
 
     def _compact(
-        self, session: Session, llm, instructions: str | None
+        self, session: Session, instructions: str | None
     ) -> CompactionResult | None:
+        if self._summarizer is None:
+            return None
         messages = session.messages
         start = session.meta.summary_through
         pending = messages[start:]
@@ -128,7 +139,7 @@ class ContextManager:
 
         to_summarize = pending[:cut]
         before_tokens = self.estimate_tokens(session)
-        summary = self._summarize(session.meta.summary, to_summarize, instructions, llm)
+        summary = self._summarize(session.meta.summary, to_summarize, instructions)
         if not summary:
             return None
 
@@ -157,7 +168,6 @@ class ContextManager:
         previous_summary: str | None,
         messages: list[dict],
         instructions: str | None,
-        llm,
     ) -> str:
         parts: list[str] = []
         if previous_summary:
@@ -170,5 +180,5 @@ class ContextManager:
             {"role": "system", "content": _SUMMARY_SYSTEM_PROMPT},
             {"role": "user", "content": "\n\n".join(parts)},
         ]
-        result = llm.complete(request, tools=None, on_text=None)
+        result = self._summarizer.complete(request, tools=None, on_text=None)
         return (result.message.content or "").strip()

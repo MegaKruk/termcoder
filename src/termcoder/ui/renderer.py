@@ -15,6 +15,7 @@ from rich.syntax import Syntax
 
 from ..approval.types import ApprovalRequest
 from ..context.compaction import CompactionResult
+from ..providers.usage import UsageStats
 from ..snapshots.store import UndoResult
 from ..tools.base import ToolResult
 
@@ -26,6 +27,30 @@ def _shorten(text: str, limit: int = _ARGS_PREVIEW_LIMIT) -> str:
     if len(flattened) <= limit:
         return flattened
     return flattened[: limit - 3] + "..."
+
+
+def _format_tokens(count: int) -> str:
+    """Format a token count compactly: 840 stays 840, 12400 becomes 12.4k."""
+    if count < 1000:
+        return str(count)
+    return f"{count / 1000:.1f}k"
+
+
+def _format_cost(cost: float) -> str:
+    """Format a dollar cost with enough precision to be informative."""
+    if cost >= 0.01:
+        return f"${cost:.2f}"
+    return f"${cost:.4f}"
+
+
+def _format_scope(stats: UsageStats) -> str:
+    text = (
+        f"{_format_tokens(stats.prompt_tokens)} in + "
+        f"{_format_tokens(stats.completion_tokens)} out"
+    )
+    if stats.cached_tokens:
+        text += f" ({_format_tokens(stats.cached_tokens)} cached)"
+    return text
 
 
 class Renderer:
@@ -103,6 +128,35 @@ class Renderer:
             f"about {result.before_tokens} -> {result.after_tokens} tokens.",
             style="dim",
             markup=False,
+        )
+
+    def usage(self, turn: UsageStats, session: UsageStats) -> None:
+        """Show a one-line token and cost readout after a turn."""
+        line = (
+            f"  [usage] turn: {turn.calls} call(s), {_format_scope(turn)}; "
+            f"session: {_format_scope(session)}"
+        )
+        if session.cost_usd > 0:
+            line += f" (~{_format_cost(session.cost_usd)})"
+        self._console.print(line, style="dim", markup=False)
+
+    def usage_report(self, session: UsageStats) -> None:
+        """Show the full session usage report for the /usage command."""
+        if session.calls == 0:
+            self.info("No model calls yet this session.")
+            return
+        self.info(f"Session usage: {session.calls} model call(s)")
+        cached = (
+            f" ({_format_tokens(session.cached_tokens)} served from cache)"
+            if session.cached_tokens
+            else ""
+        )
+        self.plain(f"  input:  {session.prompt_tokens} tokens{cached}")
+        self.plain(f"  output: {session.completion_tokens} tokens")
+        if session.cost_usd > 0:
+            self.plain(f"  estimated cost: {_format_cost(session.cost_usd)}")
+        self.tool_progress(
+            "Figures are estimates and include compaction summary calls."
         )
 
     def undone(self, result: UndoResult | None) -> None:

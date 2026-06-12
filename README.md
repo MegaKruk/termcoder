@@ -43,6 +43,25 @@ Safety and context:
   agent newly created are removed. Note that run_command effects are not
   snapshotted, since a command can change anything.
 
+Token economy:
+
+- Usage metering. Every model call is counted, including compaction summaries.
+  After each turn a dim line shows tokens in and out (plus cache hits), and
+  /usage reports session totals with an estimated cost for cloud models. Set
+  show_usage = false in the config to hide the per-turn line.
+- Prompt-cache friendly by construction. The system prompt is static and the
+  conversation is append-only between compactions, so provider prompt caches
+  hit naturally. For Anthropic models termcoder adds cache_control breakpoints
+  automatically (cached input is billed at roughly a tenth of the normal
+  price); OpenAI caches stable prefixes on its own at roughly half price. Per
+  model this can be turned off with cache_prompts = false.
+- Cheap summaries. Compaction can use a different, cheaper model via
+  context.summary_model, since the summary request is the largest single
+  prompt termcoder ever sends.
+- Retry on malformed output. Small local models occasionally emit broken
+  tool-call JSON; termcoder retries the request up to two times instead of
+  failing the whole turn.
+
 ## Requirements
 
 - Python 3.14 or newer.
@@ -110,6 +129,7 @@ python -m termcoder
 /resume <id>     Resume a previous session by id.
 /model [name]    Show or switch the active model.
 /compact [focus] Summarize older turns now to free context space.
+/usage           Show token and cost usage for this session.
 /undo            Revert the file changes from the most recent turn.
 /tools           List the available tools.
 /clear           Clear the screen.
@@ -123,7 +143,9 @@ workspace. Anything you do not set falls back to a sensible default, and the
 default model is local Ollama. See `.termcoder/config.example.toml` for the
 available keys, including how to define extra models, choose the sandbox
 backend and image, allow command network access, tune compaction thresholds,
-and turn the run_command tool or undo off entirely.
+pick a cheaper summary model, harden the container with a read-only root
+filesystem, control prompt caching and the usage readout, and turn the
+run_command tool or undo off entirely.
 
 API keys are never stored in the config file. The config only names the
 environment variable that holds each key.

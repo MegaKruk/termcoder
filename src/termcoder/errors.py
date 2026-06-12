@@ -25,3 +25,11 @@ class ToolError(TermcoderError):
 
 class ProviderError(TermcoderError):
     """Raised when the language model request fails."""
+
+
+class MalformedModelOutputError(ProviderError):
+    """Raised when the model produced output the provider layer could not parse.
+
+    Typically caused by small local models emitting invalid tool-call JSON.
+    The failure is usually nondeterministic, so callers may retry the request.
+    """

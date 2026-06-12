@@ -40,6 +40,7 @@ class ModelConfig:
     temperature: float = 0.2
     max_tokens: int | None = None
     context_window: int | None = None
+    cache_prompts: bool = True
 
     def resolve_api_key(self) -> str | None:
         """Return the API key from the configured environment variable, if any."""
@@ -67,7 +68,9 @@ class SandboxSettings:
     ``backend`` is one of 'auto', 'podman', 'docker' or 'host'. With 'auto', a
     container engine is used when available and the host is the last resort.
     Network access is off by default so commands cannot reach out unless the
-    user opts in (for example to install packages).
+    user opts in (for example to install packages). ``read_only`` additionally
+    mounts the container root filesystem read-only (with a writable /tmp),
+    which hardens runs that only need to touch the workspace.
     """
 
     backend: str = "auto"
@@ -76,15 +79,23 @@ class SandboxSettings:
     memory: str = "1g"
     cpus: float = 2.0
     pids_limit: int = 256
+    read_only: bool = False
 
 
 @dataclass(frozen=True)
 class ContextSettings:
-    """Settings for token budgeting and conversation compaction."""
+    """Settings for token budgeting and conversation compaction.
+
+    ``summary_model`` optionally names a configured model to write compaction
+    summaries. The summary request is the largest single prompt the tool ever
+    sends, so pointing it at a cheap model saves real money on cloud providers.
+    When unset, the active model summarizes.
+    """
 
     auto_compact: bool = True
     compact_threshold: float = 0.8
     keep_recent_turns: int = 3
+    summary_model: str | None = None
 
 
 @dataclass(frozen=True)
@@ -99,6 +110,7 @@ class AppConfig:
     max_tool_iterations: int = 25
     allow_run_command: bool = True
     enable_undo: bool = True
+    show_usage: bool = True
     sandbox: SandboxSettings = field(default_factory=SandboxSettings)
     context: ContextSettings = field(default_factory=ContextSettings)
 
@@ -129,6 +141,7 @@ class AppConfig:
             max_tool_iterations=self.max_tool_iterations,
             allow_run_command=self.allow_run_command,
             enable_undo=self.enable_undo,
+            show_usage=self.show_usage,
             sandbox=self.sandbox,
             context=self.context,
         )
@@ -191,6 +204,7 @@ def _model_from_toml(name: str, raw: dict, fallback: ModelConfig | None) -> Mode
         temperature=raw.get("temperature", base.temperature),
         max_tokens=raw.get("max_tokens", base.max_tokens),
         context_window=raw.get("context_window", base.context_window),
+        cache_prompts=bool(raw.get("cache_prompts", base.cache_prompts)),
     )
 
 
@@ -204,16 +218,19 @@ def _sandbox_from_toml(raw: dict) -> SandboxSettings:
         memory=str(raw.get("memory", base.memory)),
         cpus=float(raw.get("cpus", base.cpus)),
         pids_limit=int(raw.get("pids_limit", base.pids_limit)),
+        read_only=bool(raw.get("read_only", base.read_only)),
     )
 
 
 def _context_from_toml(raw: dict) -> ContextSettings:
     """Build ContextSettings from a TOML table, falling back to defaults."""
     base = ContextSettings()
+    summary_model = raw.get("summary_model", base.summary_model)
     return ContextSettings(
         auto_compact=bool(raw.get("auto_compact", base.auto_compact)),
         compact_threshold=float(raw.get("compact_threshold", base.compact_threshold)),
         keep_recent_turns=int(raw.get("keep_recent_turns", base.keep_recent_turns)),
+        summary_model=str(summary_model) if summary_model else None,
     )
 
 
@@ -249,6 +266,7 @@ def load_config(workspace: Path, model_override: str | None = None) -> AppConfig
         max_tool_iterations=int(data.get("max_tool_iterations", 25)),
         allow_run_command=bool(data.get("allow_run_command", True)),
         enable_undo=bool(data.get("enable_undo", True)),
+        show_usage=bool(data.get("show_usage", True)),
         sandbox=_sandbox_from_toml(data.get("sandbox") or {}),
         context=_context_from_toml(data.get("context") or {}),
     )

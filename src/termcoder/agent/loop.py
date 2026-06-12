@@ -24,18 +24,23 @@ from __future__ import annotations
 from typing import Protocol, runtime_checkable
 
 from ..context.compaction import CompactionResult, ContextManager
-from ..errors import ToolError, WorkspaceViolationError
+from ..errors import MalformedModelOutputError, ToolError, WorkspaceViolationError
 from ..llm.messages import (
     assistant_message_to_dict,
     system_message,
     tool_message,
     user_message,
 )
-from ..providers.llm_client import LLMClient
+from ..providers.llm_client import CompletionResult, LLMClient
 from ..sessions.store import Session
 from ..tools.base import ToolContext, ToolRegistry, ToolResult
 
 _TURN_LABEL_LIMIT = 50
+
+# Small local models occasionally emit malformed tool-call JSON, which makes
+# the provider layer raise MalformedModelOutputError. The failure is usually
+# nondeterministic, so the same request is retried a bounded number of times.
+_MALFORMED_RETRIES = 2
 
 
 def _turn_label(text: str) -> str:
@@ -92,13 +97,7 @@ class Agent:
         for _ in range(self._max_iterations):
             self._maybe_compact()
             messages = self._build_messages()
-            self._ui.begin_assistant()
-            result = self._llm.complete(
-                messages,
-                tools=self._tools.schemas(),
-                on_text=self._ui.stream_assistant,
-            )
-            self._ui.end_assistant()
+            result = self._complete_with_retry(messages)
 
             stored = assistant_message_to_dict(result.message)
             self._session.append(stored)
@@ -113,10 +112,38 @@ class Agent:
             "Send another message to continue."
         )
 
+    def _complete_with_retry(self, messages: list[dict]) -> CompletionResult:
+        """Call the model, retrying a bounded number of malformed responses.
+
+        Each attempt streams normally; a failed attempt may therefore have
+        already shown partial text, which the warning explains. Any other
+        provider failure propagates immediately.
+        """
+        for attempt in range(1 + _MALFORMED_RETRIES):
+            self._ui.begin_assistant()
+            try:
+                result = self._llm.complete(
+                    messages,
+                    tools=self._tools.schemas(),
+                    on_text=self._ui.stream_assistant,
+                )
+            except MalformedModelOutputError:
+                self._ui.end_assistant()
+                if attempt == _MALFORMED_RETRIES:
+                    raise
+                self._ui.warning(
+                    "The model returned malformed output; retrying "
+                    f"({attempt + 1} of {_MALFORMED_RETRIES})."
+                )
+                continue
+            self._ui.end_assistant()
+            return result
+        raise AssertionError("unreachable")
+
     def _maybe_compact(self) -> None:
         if self._context_manager is None:
             return
-        result = self._context_manager.maybe_compact(self._session, self._llm)
+        result = self._context_manager.maybe_compact(self._session)
         if result is not None:
             self._ui.compacted(result)
 

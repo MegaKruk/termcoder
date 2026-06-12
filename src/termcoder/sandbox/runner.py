@@ -13,8 +13,10 @@ implementing the same protocol, with no change to the tool.
 
 from __future__ import annotations
 
+import os
 import secrets
 import shutil
+import signal
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -85,16 +87,25 @@ class HostCommandRunner:
         return "This command runs directly on your host with no sandbox."
 
     def run(self, command: str, timeout: int) -> CommandResult:
+        """Run the command in its own process group, so a timeout kills it all.
+
+        ``subprocess.run(timeout=...)`` only kills the immediate child; any
+        background children it spawned would survive. Starting a new session
+        and killing the process group closes that gap.
+        """
+        process = subprocess.Popen(
+            command,
+            shell=True,
+            cwd=str(self._root),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
         try:
-            completed = subprocess.run(
-                command,
-                shell=True,
-                cwd=str(self._root),
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
+            stdout, stderr = process.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
+            self._kill_group(process)
             return CommandResult(
                 returncode=124,
                 stdout="",
@@ -103,11 +114,22 @@ class HostCommandRunner:
                 timed_out=True,
             )
         return CommandResult(
-            returncode=completed.returncode,
-            stdout=completed.stdout or "",
-            stderr=completed.stderr or "",
+            returncode=process.returncode,
+            stdout=stdout or "",
+            stderr=stderr or "",
             backend=self.backend,
         )
+
+    @staticmethod
+    def _kill_group(process: subprocess.Popen) -> None:
+        try:
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            process.kill()
+        try:
+            process.communicate(timeout=_HOST_TIMEOUT_SLACK_SECONDS)
+        except (subprocess.TimeoutExpired, ValueError):
+            pass
 
 
 class ContainerCommandRunner:
@@ -131,10 +153,11 @@ class ContainerCommandRunner:
 
     def describe(self) -> str:
         network = "network enabled" if self._settings.network else "no network"
+        rootfs = ", read-only rootfs" if self._settings.read_only else ""
         return (
             f"This command runs in a rootless {self._engine} container "
             f"(image {self._settings.image}, {network}, workspace mounted "
-            "read-write)."
+            f"read-write{rootfs})."
         )
 
     def run(self, command: str, timeout: int) -> CommandResult:
@@ -193,6 +216,8 @@ class ContainerCommandRunner:
             argv += ["--cpus", str(self._settings.cpus)]
         if self._settings.pids_limit:
             argv += ["--pids-limit", str(self._settings.pids_limit)]
+        if self._settings.read_only:
+            argv += ["--read-only", "--tmpfs", "/tmp"]
         argv += ["--volume", f"{self._root}:/workspace", "--workdir", "/workspace"]
         argv += [self._settings.image, "sh", "-c", command]
         return argv

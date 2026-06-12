@@ -20,6 +20,7 @@ from ..config import AppConfig
 from ..context import ContextManager, TokenCounter
 from ..errors import ConfigError, ProviderError, TermcoderError
 from ..providers.llm_client import LLMClient
+from ..providers.usage import UsageTracker
 from ..sandbox.runner import build_command_runner
 from ..sessions.store import SessionStore
 from ..snapshots.store import NullSnapshotStore, SnapshotStore
@@ -36,6 +37,7 @@ _HELP = """Commands:
   /resume <id>         Resume a previous session by id.
   /model [name]        Show the active model, or switch to another configured one.
   /compact [focus]     Summarize older turns now to free context space.
+  /usage               Show token and cost usage for this session.
   /undo                Revert the file changes from the most recent turn.
   /tools               List the available tools.
   /clear               Clear the screen.
@@ -64,6 +66,7 @@ class Repl:
             snapshots=NullSnapshotStore(),
         )
 
+        self._usage = UsageTracker()
         self._llm = self._build_client()
         self._token_counter = TokenCounter()
         self._context_manager = self._build_context_manager()
@@ -95,6 +98,7 @@ class Repl:
         self._renderer.info("Goodbye.")
 
     def _run_turn(self, line: str) -> None:
+        self._usage.begin_turn()
         try:
             self._agent.run_turn(line)
         except ProviderError as exc:
@@ -107,6 +111,9 @@ class Repl:
             )
         except KeyboardInterrupt:
             self._renderer.warning("Interrupted this turn.")
+        finally:
+            if self._config.show_usage and self._usage.turn.calls:
+                self._renderer.usage(self._usage.turn, self._usage.session)
 
     def _sandbox_label(self) -> str:
         if self._runner.is_sandboxed:
@@ -114,7 +121,29 @@ class Repl:
         return "host (no sandbox)"
 
     def _build_client(self) -> LLMClient:
-        return LLMClient(self._config.model(), stream=self._config.stream)
+        return LLMClient(
+            self._config.model(),
+            stream=self._config.stream,
+            usage_tracker=self._usage,
+        )
+
+    def _build_summarizer(self) -> LLMClient:
+        """Build the client that writes compaction summaries.
+
+        Uses ``context.summary_model`` when configured, so a cheap model can
+        handle the largest prompt termcoder sends; otherwise the active model.
+        """
+        name = self._config.context.summary_model
+        if name:
+            model_config = self._config.models.get(name)
+            if model_config is None:
+                raise ConfigError(
+                    f"context.summary_model '{name}' is not a configured model. "
+                    "Add it under [models] or remove the setting."
+                )
+        else:
+            model_config = self._config.model()
+        return LLMClient(model_config, stream=False, usage_tracker=self._usage)
 
     def _build_context_manager(self) -> ContextManager:
         settings = self._config.context
@@ -123,6 +152,7 @@ class Repl:
             compact_threshold=settings.compact_threshold,
             keep_recent_turns=settings.keep_recent_turns,
             context_window=self._config.model().context_window,
+            summarizer=self._build_summarizer(),
             token_counter=self._token_counter,
         )
 
@@ -149,6 +179,7 @@ class Repl:
 
     def _rebind_session(self) -> None:
         """Refresh per-session state after the active session changes."""
+        self._usage.reset()
         self._snapshots = self._build_snapshots()
         self._context.snapshots = self._snapshots
         self._agent = self._build_agent()
@@ -172,6 +203,8 @@ class Repl:
             self._cmd_model(argument)
         elif command == "/compact":
             self._cmd_compact(argument)
+        elif command == "/usage":
+            self._renderer.usage_report(self._usage.session)
         elif command == "/undo":
             self._cmd_undo()
         elif command == "/tools":
@@ -233,7 +266,7 @@ class Repl:
     def _cmd_compact(self, instructions: str) -> None:
         try:
             result = self._context_manager.force_compact(
-                self._session, self._llm, instructions or None
+                self._session, instructions or None
             )
         except ProviderError as exc:
             self._renderer.error(str(exc))

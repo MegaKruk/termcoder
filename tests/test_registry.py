@@ -52,3 +52,35 @@ def test_schemas_are_function_tools(tmp_path):
     schemas = registry.schemas()
     assert all(item["type"] == "function" for item in schemas)
     assert all("name" in item["function"] for item in schemas)
+
+
+def test_load_config_parses_audit_keys(tmp_path):
+    from termcoder.config import load_config
+
+    config_dir = tmp_path / ".termcoder"
+    config_dir.mkdir()
+    (config_dir / "config.toml").write_text(
+        """
+show_usage = false
+
+[sandbox]
+read_only = true
+
+[context]
+summary_model = "ollama"
+
+[models.gpt]
+model = "gpt-4o"
+cache_prompts = false
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(tmp_path)
+
+    assert config.show_usage is False
+    assert config.sandbox.read_only is True
+    assert config.context.summary_model == "ollama"
+    assert config.models["gpt"].cache_prompts is False
+    # Untouched models keep the default.
+    assert config.models["ollama"].cache_prompts is True

@@ -8,6 +8,7 @@ host runner is exercised directly with a harmless echo.
 from __future__ import annotations
 
 import shutil
+import time
 
 import pytest
 
@@ -107,3 +108,32 @@ def test_build_runner_explicit_missing_raises(tmp_path, monkeypatch):
     monkeypatch.setattr(shutil, "which", lambda name: None)
     with pytest.raises(ConfigError):
         build_command_runner(SandboxSettings(backend="podman"), tmp_path)
+
+
+def test_host_runner_timeout_kills_process_group(tmp_path):
+    runner = HostCommandRunner(tmp_path)
+    started = time.monotonic()
+    result = runner.run("sleep 30", timeout=1)
+    elapsed = time.monotonic() - started
+
+    assert result.timed_out
+    assert result.returncode == 124
+    assert not result.ok
+    assert elapsed < 10
+
+
+def test_container_argv_read_only_rootfs(tmp_path):
+    runner = ContainerCommandRunner(
+        "podman", SandboxSettings(read_only=True), tmp_path
+    )
+    argv = runner._build_argv("ls", "name")
+    assert "--read-only" in argv
+    assert "--tmpfs" in argv
+    assert argv[argv.index("--tmpfs") + 1] == "/tmp"
+    assert "read-only rootfs" in runner.describe()
+
+
+def test_container_argv_default_is_writable_rootfs(tmp_path):
+    runner = ContainerCommandRunner("podman", SandboxSettings(), tmp_path)
+    argv = runner._build_argv("ls", "name")
+    assert "--read-only" not in argv

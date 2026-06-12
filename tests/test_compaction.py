@@ -79,15 +79,16 @@ def test_cut_index_zero_when_few_turns():
 def test_maybe_compact_summarizes_when_over_budget(tmp_path):
     session = _session(tmp_path)
     _add_turns(session, 6)
+    llm = ScriptedLLM("THE SUMMARY")
     manager = ContextManager(
         auto_compact=True,
         compact_threshold=0.01,
         keep_recent_turns=2,
         context_window=100,
+        summarizer=llm,
     )
-    llm = ScriptedLLM("THE SUMMARY")
 
-    result = manager.maybe_compact(session, llm)
+    result = manager.maybe_compact(session)
 
     assert result is not None
     assert session.meta.summary == "THE SUMMARY"
@@ -101,15 +102,16 @@ def test_maybe_compact_summarizes_when_over_budget(tmp_path):
 def test_no_compaction_below_budget(tmp_path):
     session = _session(tmp_path)
     _add_turns(session, 1)
+    llm = ScriptedLLM()
     manager = ContextManager(
         auto_compact=True,
         compact_threshold=0.8,
         keep_recent_turns=2,
         context_window=100000,
+        summarizer=llm,
     )
-    llm = ScriptedLLM()
 
-    assert manager.maybe_compact(session, llm) is None
+    assert manager.maybe_compact(session) is None
     assert llm.calls == 0
     assert session.meta.summary is None
 
@@ -122,10 +124,10 @@ def test_force_compact_ignores_budget(tmp_path):
         compact_threshold=0.8,
         keep_recent_turns=2,
         context_window=100000,
+        summarizer=ScriptedLLM("FORCED"),
     )
-    llm = ScriptedLLM("FORCED")
 
-    result = manager.force_compact(session, llm, instructions="focus on the goal")
+    result = manager.force_compact(session, instructions="focus on the goal")
 
     assert result is not None
     assert session.meta.summary == "FORCED"
@@ -159,10 +161,25 @@ def test_compaction_preserves_tool_pairing(tmp_path):
         compact_threshold=0.01,
         keep_recent_turns=1,
         context_window=50,
+        summarizer=ScriptedLLM("S"),
     )
-    manager.maybe_compact(session, ScriptedLLM("S"))
+    manager.maybe_compact(session)
 
     assert session.meta.summary_through == 5
     tail = manager.tail_messages(session)
     assert tail[0]["role"] == "user"
     assert all(message["role"] != "tool" for message in tail)
+
+
+def test_no_summarizer_means_no_compaction(tmp_path):
+    session = _session(tmp_path)
+    _add_turns(session, 6)
+    manager = ContextManager(
+        auto_compact=True,
+        compact_threshold=0.01,
+        keep_recent_turns=2,
+        context_window=100,
+    )
+
+    assert manager.maybe_compact(session) is None
+    assert session.meta.summary is None

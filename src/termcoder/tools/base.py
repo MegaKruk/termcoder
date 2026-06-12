@@ -25,7 +25,7 @@ from pydantic import BaseModel, ValidationError
 
 from ..approval.types import ApprovalRequest, Approver
 from ..errors import ToolError
-from ..snapshots.store import NullSnapshotStore, SnapshotStore
+from ..snapshots.store import NullSnapshotStore, Snapshots
 from ..workspace.paths import WorkspaceGuard
 
 
@@ -44,7 +44,7 @@ class ToolContext:
     workspace: WorkspaceGuard
     approver: Approver
     emit: Callable[[str], None] = _noop_emit
-    snapshots: SnapshotStore | NullSnapshotStore = field(default_factory=NullSnapshotStore)
+    snapshots: Snapshots = field(default_factory=NullSnapshotStore)
 
 
 @dataclass

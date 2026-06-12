@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 from ..workspace.paths import WorkspaceGuard
 
@@ -32,6 +33,18 @@ class UndoResult:
     restored: list[str]
     deleted: list[str]
     skipped: list[str]
+
+
+class Snapshots(Protocol):
+    """What the tool layer needs from a snapshot store."""
+
+    def start_turn(self, label: str) -> None: ...
+
+    def capture(self, path: Path) -> None: ...
+
+    def has_undo(self) -> bool: ...
+
+    def undo_last(self) -> UndoResult | None: ...
 
 
 class NullSnapshotStore:
