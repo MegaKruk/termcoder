@@ -79,6 +79,10 @@ class Renderer:
     def info(self, text: str) -> None:
         self._console.print(text, style="cyan")
 
+    def status(self, text: str) -> None:
+        """Print a dim status line, used for startup facts like the repo map."""
+        self._console.print(text, style="dim", markup=False)
+
     def warning(self, text: str) -> None:
         self._console.print(text, style="yellow")
 

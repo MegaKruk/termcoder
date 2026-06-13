@@ -19,6 +19,7 @@ CONFIG_DIRNAME = ".termcoder"
 CONFIG_FILENAME = "config.toml"
 SESSIONS_DIRNAME = "sessions"
 SNAPSHOTS_DIRNAME = "snapshots"
+CACHE_DIRNAME = "cache"
 HISTORY_FILENAME = "repl_history"
 
 
@@ -99,6 +100,32 @@ class ContextSettings:
 
 
 @dataclass(frozen=True)
+class RepoMapSettings:
+    """Settings for the repository map injected into the system prompt.
+
+    The map is built once per session (and on /map refresh) so the prompt
+    prefix stays stable and cache-friendly. ``tokens`` is the budget the map
+    is fitted into; Aider's long-standing default of about 1k tokens is a good
+    balance of orientation value and cost.
+    """
+
+    enabled: bool = True
+    tokens: int = 1024
+
+
+@dataclass(frozen=True)
+class MemorySettings:
+    """Settings for project memory loaded from a markdown file.
+
+    The first existing file from ``files`` is used. TERMCODER.md is the native
+    name; AGENTS.md is recognized as a cross-tool fallback.
+    """
+
+    enabled: bool = True
+    files: tuple[str, ...] = ("TERMCODER.md", "AGENTS.md")
+
+
+@dataclass(frozen=True)
 class AppConfig:
     """Top-level runtime configuration for a single workspace."""
 
@@ -113,6 +140,8 @@ class AppConfig:
     show_usage: bool = True
     sandbox: SandboxSettings = field(default_factory=SandboxSettings)
     context: ContextSettings = field(default_factory=ContextSettings)
+    repomap: RepoMapSettings = field(default_factory=RepoMapSettings)
+    memory: MemorySettings = field(default_factory=MemorySettings)
 
     def model(self) -> ModelConfig:
         """Return the currently selected model configuration."""
@@ -144,6 +173,8 @@ class AppConfig:
             show_usage=self.show_usage,
             sandbox=self.sandbox,
             context=self.context,
+            repomap=self.repomap,
+            memory=self.memory,
         )
 
     @property
@@ -155,6 +186,11 @@ class AppConfig:
     def snapshots_dir(self) -> Path:
         """Directory holding file snapshots used for undo."""
         return self.config_dir / SNAPSHOTS_DIRNAME
+
+    @property
+    def cache_dir(self) -> Path:
+        """Directory holding rebuildable caches such as the repo map tags."""
+        return self.config_dir / CACHE_DIRNAME
 
     @property
     def history_path(self) -> Path:
@@ -222,6 +258,27 @@ def _sandbox_from_toml(raw: dict) -> SandboxSettings:
     )
 
 
+def _repomap_from_toml(raw: dict) -> RepoMapSettings:
+    """Build RepoMapSettings from a TOML table, falling back to defaults."""
+    base = RepoMapSettings()
+    return RepoMapSettings(
+        enabled=bool(raw.get("enabled", base.enabled)),
+        tokens=int(raw.get("tokens", base.tokens)),
+    )
+
+
+def _memory_from_toml(raw: dict) -> MemorySettings:
+    """Build MemorySettings from a TOML table, falling back to defaults."""
+    base = MemorySettings()
+    files = raw.get("files", list(base.files))
+    if isinstance(files, str):
+        files = [files]
+    return MemorySettings(
+        enabled=bool(raw.get("enabled", base.enabled)),
+        files=tuple(str(name) for name in files if str(name).strip()),
+    )
+
+
 def _context_from_toml(raw: dict) -> ContextSettings:
     """Build ContextSettings from a TOML table, falling back to defaults."""
     base = ContextSettings()
@@ -269,4 +326,6 @@ def load_config(workspace: Path, model_override: str | None = None) -> AppConfig
         show_usage=bool(data.get("show_usage", True)),
         sandbox=_sandbox_from_toml(data.get("sandbox") or {}),
         context=_context_from_toml(data.get("context") or {}),
+        repomap=_repomap_from_toml(data.get("repomap") or {}),
+        memory=_memory_from_toml(data.get("memory") or {}),
     )

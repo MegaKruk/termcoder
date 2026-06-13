@@ -7,26 +7,10 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from ..workspace.ignore import IGNORED_DIRS
 from .base import ReadOnlyTool, ToolContext, ToolResult
 
-# Folders that add noise to listings and are skipped during recursive walks.
-IGNORED_DIRS = frozenset(
-    {
-        ".git",
-        ".hg",
-        ".svn",
-        "__pycache__",
-        "node_modules",
-        ".venv",
-        "venv",
-        ".mypy_cache",
-        ".pytest_cache",
-        ".ruff_cache",
-        "dist",
-        "build",
-        ".termcoder",
-    }
-)
+__all__ = ["ListDirectoryTool", "IGNORED_DIRS"]
 
 
 class ListDirectoryArgs(BaseModel):

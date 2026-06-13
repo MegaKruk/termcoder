@@ -19,8 +19,10 @@ from ..agent.system_prompt import build_system_prompt
 from ..config import AppConfig
 from ..context import ContextManager, TokenCounter
 from ..errors import ConfigError, ProviderError, TermcoderError
+from ..memory.loader import ProjectMemory, load_project_memory
 from ..providers.llm_client import LLMClient
 from ..providers.usage import UsageTracker
+from ..repomap.builder import RepoMapBuilder, RepoMapResult
 from ..sandbox.runner import build_command_runner
 from ..sessions.store import SessionStore
 from ..snapshots.store import NullSnapshotStore, SnapshotStore
@@ -31,17 +33,19 @@ from .approver import ConsoleApprover
 from .renderer import Renderer
 
 _HELP = """Commands:
-  /help                Show this help.
-  /new                 Start a new chat session.
-  /sessions            List chat sessions for this workspace.
-  /resume <id>         Resume a previous session by id.
-  /model [name]        Show the active model, or switch to another configured one.
-  /compact [focus]     Summarize older turns now to free context space.
-  /usage               Show token and cost usage for this session.
-  /undo                Revert the file changes from the most recent turn.
-  /tools               List the available tools.
-  /clear               Clear the screen.
-  /exit, /quit         Leave termcoder.
+  /help\t\t\thow this help.
+  /new\t\t\tStart a new chat session.
+  /sessions\t\tList chat sessions for this workspace.
+  /resume <id>\t\tResume a previous session by id.
+  /model [name]\t\tShow the active model, or switch to another configured one.
+  /compact [focus]\t\tSummarize older turns now to free context space.
+  /usage\t\tShow token and cost usage for this session.
+  /map [refresh]\t\t\tShow the repository map, or rebuild it from the files.
+  /memory [reload]\t\tShow the project memory file, or reload it from disk.
+  /undo\t\t\tRevert the file changes from the most recent turn.
+  /tools\t\tList the available tools.
+  /clear\t\tClear the screen.
+  /exit, /quit\t\tLeave termcoder.
 """
 
 
@@ -69,6 +73,9 @@ class Repl:
         self._usage = UsageTracker()
         self._llm = self._build_client()
         self._token_counter = TokenCounter()
+        self._memory = self._load_memory()
+        self._repo_map = self._build_repo_map()
+        self._system_prompt = self._compose_system_prompt()
         self._context_manager = self._build_context_manager()
         self._session = self._store.create(model=config.active_model)
         self._snapshots = self._build_snapshots()
@@ -80,6 +87,7 @@ class Repl:
         self._renderer.banner(
             self._config.workspace, self._llm.model_name, sandbox=self._sandbox_label()
         )
+        self._show_understanding_status()
         while True:
             try:
                 line = self._prompt.prompt("you> ")
@@ -145,6 +153,50 @@ class Repl:
             model_config = self._config.model()
         return LLMClient(model_config, stream=False, usage_tracker=self._usage)
 
+    def _load_memory(self) -> ProjectMemory | None:
+        settings = self._config.memory
+        if not settings.enabled or not settings.files:
+            return None
+        return load_project_memory(self._config.workspace, settings.files)
+
+    def _build_repo_map(self) -> RepoMapResult | None:
+        settings = self._config.repomap
+        if not settings.enabled:
+            return None
+        builder = RepoMapBuilder(
+            root=self._config.workspace,
+            cache_path=self._config.cache_dir / "repomap.json",
+            budget_tokens=settings.tokens,
+            token_counter=self._token_counter,
+        )
+        return builder.build()
+
+    def _compose_system_prompt(self) -> str:
+        """Compose the full, session-stable system prompt."""
+        map_text = self._repo_map.text if self._repo_map else None
+        return build_system_prompt(
+            self._workspace.root,
+            self._tools.names(),
+            platform.system(),
+            memory=self._memory,
+            repo_map=map_text,
+        )
+
+    def _show_understanding_status(self) -> None:
+        """Report what context the agent starts with, in dim status lines."""
+        if self._memory is not None:
+            note = " (truncated)" if self._memory.truncated else ""
+            self._renderer.status(f"memory: {self._memory.path.name}{note}")
+        if self._repo_map is not None:
+            if self._repo_map.text:
+                self._renderer.status(
+                    f"repo map: {self._repo_map.tag_count} symbols from "
+                    f"{self._repo_map.file_count} files, "
+                    f"about {self._repo_map.tokens} tokens"
+                )
+            else:
+                self._renderer.status(f"repo map: off ({self._repo_map.reason})")
+
     def _build_context_manager(self) -> ContextManager:
         settings = self._config.context
         return ContextManager(
@@ -154,6 +206,7 @@ class Repl:
             context_window=self._config.model().context_window,
             summarizer=self._build_summarizer(),
             token_counter=self._token_counter,
+            system_prompt_tokens=self._token_counter.count_text(self._system_prompt),
         )
 
     def _build_snapshots(self):
@@ -163,19 +216,22 @@ class Repl:
         return SnapshotStore(root, self._workspace)
 
     def _build_agent(self) -> Agent:
-        prompt = build_system_prompt(
-            self._workspace.root, self._tools.names(), platform.system()
-        )
         return Agent(
             llm=self._llm,
             tools=self._tools,
             context=self._context,
             session=self._session,
             ui=self._renderer,
-            system_prompt=prompt,
+            system_prompt=self._system_prompt,
             max_iterations=self._config.max_tool_iterations,
             context_manager=self._context_manager,
         )
+
+    def _rebuild_prompt_dependents(self) -> None:
+        """Recompose the prompt and rebuild what depends on its size."""
+        self._system_prompt = self._compose_system_prompt()
+        self._context_manager = self._build_context_manager()
+        self._agent = self._build_agent()
 
     def _rebind_session(self) -> None:
         """Refresh per-session state after the active session changes."""
@@ -205,6 +261,10 @@ class Repl:
             self._cmd_compact(argument)
         elif command == "/usage":
             self._renderer.usage_report(self._usage.session)
+        elif command == "/map":
+            self._cmd_map(argument)
+        elif command == "/memory":
+            self._cmd_memory(argument)
         elif command == "/undo":
             self._cmd_undo()
         elif command == "/tools":
@@ -283,6 +343,49 @@ class Repl:
             )
             return
         self._renderer.undone(self._snapshots.undo_last())
+
+    def _cmd_map(self, argument: str) -> None:
+        if argument and argument.lower() != "refresh":
+            self._renderer.warning("Usage: /map or /map refresh.")
+            return
+        if not self._config.repomap.enabled:
+            self._renderer.info("The repo map is disabled (repomap.enabled = false).")
+            return
+        if argument:
+            self._repo_map = self._build_repo_map()
+            self._rebuild_prompt_dependents()
+            self._renderer.info("Rebuilt the repository map from the current files.")
+        if self._repo_map is None or self._repo_map.text is None:
+            reason = self._repo_map.reason if self._repo_map else "not built"
+            self._renderer.info(f"No repository map: {reason}.")
+            return
+        self._renderer.plain(self._repo_map.text)
+        self._renderer.status(
+            f"({self._repo_map.tag_count} symbols from {self._repo_map.file_count} "
+            f"files, about {self._repo_map.tokens} of "
+            f"{self._config.repomap.tokens} budgeted tokens)"
+        )
+
+    def _cmd_memory(self, argument: str) -> None:
+        if argument and argument.lower() != "reload":
+            self._renderer.warning("Usage: /memory or /memory reload.")
+            return
+        if not self._config.memory.enabled:
+            self._renderer.info("Project memory is disabled (memory.enabled = false).")
+            return
+        if argument:
+            self._memory = self._load_memory()
+            self._rebuild_prompt_dependents()
+            self._renderer.info("Reloaded project memory from disk.")
+        if self._memory is None:
+            names = ", ".join(self._config.memory.files)
+            self._renderer.info(
+                f"No project memory file found (looked for: {names}). Create "
+                "one to give the agent durable project context."
+            )
+            return
+        self._renderer.status(f"memory file: {self._memory.path}")
+        self._renderer.plain(self._memory.text)
 
     def _cmd_tools(self) -> None:
         for tool in self._tools:

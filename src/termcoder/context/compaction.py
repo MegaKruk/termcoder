@@ -78,6 +78,7 @@ class ContextManager:
         context_window: int | None,
         summarizer=None,
         token_counter: TokenCounter | None = None,
+        system_prompt_tokens: int | None = None,
     ):
         self._auto_compact = auto_compact
         self._threshold = compact_threshold
@@ -85,6 +86,7 @@ class ContextManager:
         self._context_window = context_window
         self._summarizer = summarizer
         self._tokens = token_counter or TokenCounter()
+        self._system_prompt_tokens = system_prompt_tokens
 
     def summary_text(self, session: Session) -> str | None:
         """Return the stored summary for the session, if any."""
@@ -96,7 +98,10 @@ class ContextManager:
 
     def estimate_tokens(self, session: Session) -> int:
         """Estimate the token size of the current working context."""
-        total = _SYSTEM_PROMPT_TOKEN_ESTIMATE
+        if self._system_prompt_tokens is not None:
+            total = self._system_prompt_tokens
+        else:
+            total = _SYSTEM_PROMPT_TOKEN_ESTIMATE
         summary = session.meta.summary
         if summary:
             total += self._tokens.count_text(summary)

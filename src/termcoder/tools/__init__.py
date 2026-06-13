@@ -19,6 +19,7 @@ from .base import (
     ToolResult,
 )
 from .edit_file import EditFileTool
+from .find_files import FindFilesTool
 from .list_directory import ListDirectoryTool
 from .read_file import ReadFileTool
 from .run_command import RunCommandTool
@@ -34,6 +35,7 @@ __all__ = [
     "ToolPreview",
     "ToolRegistry",
     "ReadFileTool",
+    "FindFilesTool",
     "ListDirectoryTool",
     "SearchTextTool",
     "WriteFileTool",
@@ -55,6 +57,7 @@ def build_default_registry(
     registry = ToolRegistry()
     registry.register(ReadFileTool())
     registry.register(ListDirectoryTool())
+    registry.register(FindFilesTool())
     registry.register(SearchTextTool())
     registry.register(WriteFileTool())
     registry.register(EditFileTool())

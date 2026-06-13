@@ -34,6 +34,13 @@ class SearchTextArgs(BaseModel):
     max_results: int = Field(
         default=200, ge=1, le=2000, description="Maximum number of matches to return."
     )
+    include: str | None = Field(
+        default=None,
+        description=(
+            "Optional glob limiting which files are searched, matched against "
+            "file names and workspace-relative paths, for example '*.py'."
+        ),
+    )
 
 
 class SearchTextTool(ReadOnlyTool):
@@ -43,7 +50,8 @@ class SearchTextTool(ReadOnlyTool):
     description = (
         "Search file contents for a regular expression and return matching lines "
         "as 'path:line: text'. Uses ripgrep when available, otherwise a built-in "
-        "scanner. Prefer this over reading whole files when looking for something."
+        "scanner. Use include to limit the search to matching files, for example "
+        "'*.py'. Prefer this over reading whole files when looking for something."
     )
     args_model = SearchTextArgs
 
@@ -77,6 +85,8 @@ class SearchTextTool(ReadOnlyTool):
         command = ["rg", "--line-number", "--no-heading", "--color", "never"]
         if args.case_insensitive:
             command.append("--ignore-case")
+        if args.include:
+            command += ["--glob", args.include]
         command += ["--regexp", args.pattern, str(base)]
         try:
             completed = subprocess.run(
@@ -107,17 +117,27 @@ class SearchTextTool(ReadOnlyTool):
         files = [base] if base.is_file() else self._iter_files(base)
         results: list[str] = []
         for file_path in files:
+            rel = context.workspace.relative(file_path)
+            if args.include and not self._include_matches(
+                args.include, rel, file_path.name
+            ):
+                continue
             try:
                 text = file_path.read_text(encoding="utf-8")
             except (UnicodeDecodeError, OSError):
                 continue
-            rel = context.workspace.relative(file_path)
             for number, line in enumerate(text.splitlines(), start=1):
                 if regex.search(line):
                     results.append(f"{rel}:{number}: {line.strip()}")
                     if len(results) >= HARD_MATCH_CAP:
                         return results
         return results
+
+    @staticmethod
+    def _include_matches(include: str, rel: str, name: str) -> bool:
+        from fnmatch import fnmatch
+
+        return fnmatch(rel, include) or fnmatch(name, include)
 
     @staticmethod
     def _iter_files(base: Path):

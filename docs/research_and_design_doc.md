@@ -13,7 +13,8 @@
 
 - **Phase 1 (MVP): done, v0.1.0.** Implemented, covered by the offline test suite, and validated end to end against a local model (Devstral via Ollama) and a cloud model (gpt-5.4-mini): read/list/search, create/edit with diff approval, command execution, approve-once, reject-with-feedback, session persistence, workspace confinement.
 - **Phase 2 (safety and context): done, v0.2.0.** Rootless Podman sandbox, token counting plus auto-compaction, per-turn snapshots with undo. Sandbox verified end to end on rootless Podman on Manjaro (container provenance proven via /etc/os-release, network isolation, ephemeral /tmp, live podman ps observation).
-- **Post-Phase-2 audit: done, v0.3.0 (this revision).** Added the token-economy workstream and hardening; see findings 11-12 and the roadmap.
+- **Post-Phase-2 audit: done, v0.3.0.** Added the token-economy workstream and hardening; see findings 11-12 and the roadmap.
+- **Phase 3 (understanding): done, v0.4.0 (this revision).** Tree-sitter PageRank repo map (token-budgeted, mtime-cached, injected as a stable cacheable system-prompt block, eight languages), find_files plus an include glob on search_text, and TERMCODER.md/AGENTS.md project memory. See the as-built notes under "Codebase understanding".
 
 ---
 
@@ -100,6 +101,8 @@ Secondary levers, already partly designed in: use a cheaper model for compaction
 - **Timestamps need microsecond precision.** Session ids and recency ordering with second resolution caused nondeterministic orderings; ISO 8601 with microseconds sorts lexicographically and fixed it.
 - **Sandbox verification that cannot be faked:** run `cat /etc/os-release` through the agent (container answers Debian, host would answer Manjaro), prove `--network none` with a urllib call, prove ephemerality by writing to container `/tmp` and checking the host, and watch `podman ps` during a long sleep to see the termcoder-named container with its hardening flags.
 - **`subprocess.run(timeout=...)` kills only the immediate child.** Host-mode command timeouts must kill the whole process group or background children survive the timeout.
+- **tree-sitter-language-pack 1.x downloads parsers from GitHub at runtime** instead of bundling them in the wheel (observed live: a fresh install fails offline with a download error on first `get_language` call). That silently breaks offline use and is a privacy regression, so termcoder pins the package below 1.0, where every parser ships inside the wheel. Worth re-checking on each dependency review.
+- **networkx 3.x `pagerank` requires numpy.** The implementation delegates to scipy, so calling it without numpy installed raises ModuleNotFoundError at runtime even though networkx itself imports fine. Rather than adding numpy and scipy as transitive weight, termcoder replaced the call with a ~30-line deterministic power iteration and dropped networkx entirely.
 
 ---
 
@@ -129,6 +132,16 @@ Copilot CLI (`npm install -g @github/copilot`) is "an autonomous coding agent th
 2. **Agentic search (primary):** give the agent `ripgrep`-backed `search`, `find`, `read_file`, and `ls` tools and let it iterate. This is what Claude Code/Cursor/Cline converged on.
 3. **Optional semantic layer (large repos):** **AST/cAST chunking** (the cAST method, arXiv:2506.15655, EMNLP 2025 Findings - a recursive split-then-merge over tree-sitter AST nodes that "respects syntactic integrity, packs each chunk to a fixed size budget, is language-invariant, and reproduces the original file verbatim when concatenated"; reference implementations: `astchunk` and Supermemory's `code-chunk`) -> embeddings via **nomic-embed-code** (7B, GPU; weights/data/eval fully open) or **nomic-embed-text v1.5** (CPU, "the best model you can run everywhere") / **Qwen3-Embedding** via Ollama -> **LanceDB** (embedded, serverless, Rust, Apache-2.0 - "an open-source embedded vector database... runs in-process with zero-copy access to data... without a running server," the best fit for a local-first embedded Python app; ChromaDB Apache-2.0 is a close runner-up, Qdrant is more server-oriented). Expose as one optional `semantic_search` tool the agent may call.
 
+**As built (Phase 3, v0.4.0), with deliberate deviations:**
+- **Tags:** vendored, empirically validated `*-tags.scm` queries for eight languages (Python, JavaScript, TypeScript incl. tsx, Go, Rust, Java, C, C++); adding a language is one query file plus one extension-map entry, no code changes. Definition tags carry the stripped source line so the map shows signatures without re-reading files.
+- **Ranking:** files are nodes, a referencing file points at every file defining the symbol (self-references skipped), edge weights mirror Aider's multipliers (reference count, 0.1x for leading-underscore names, 10x for long well-formed names); each file's PageRank is distributed over its definitions in proportion to inbound reference weight, with light smoothing so unreferenced definitions keep a small share. Chat-file boosting is deliberately absent for now: it would make the map vary per request, which conflicts with the stable-prefix rule below.
+- **PageRank without networkx:** networkx 3.x delegates `pagerank` to scipy and therefore requires numpy at runtime; pulling numpy and scipy into a terminal tool for one algorithm fails the minimal-dependency test, so termcoder ships a deterministic ~30-line pure-Python power iteration (damping 0.85, dangling-mass redistribution) and networkx is not a dependency.
+- **Cache:** plain JSON at `.termcoder/cache/repomap.json` keyed by mtime and size, pruned of deleted files, corruption-tolerant. Deviation from the SQLite recommendation above: JSON honors the plain-text, inspectable-state principle and is ample at this scale (measured on termcoder itself: 1.3s cold across 64 files, 0.06s cached).
+- **Token-economy contract:** the map is fitted to `repomap.tokens` (default 1024, Aider's long-standing default) by binary search and then **frozen for the session** as part of the system prompt, so the prompt prefix stays byte-stable and provider caches keep hitting. Aider regenerates its map per request; termcoder deliberately does not. `/map` shows the snapshot, `/map refresh` rebuilds it (busting the cache once, on purpose), and the system prompt tells the model the map is a session-start snapshot so it reads files for current state.
+- **Agentic search:** the quartet is complete: `search_text` (ripgrep with fallback, now with an `include` file glob), `find_files` (fnmatch over workspace-relative paths where `*` crosses directory separators), `read_file` (line ranges), `list_directory`. All capped and noise-filtered through one shared ignore set in `workspace/ignore.py`.
+- **Memory:** the first existing of `TERMCODER.md` / `AGENTS.md` (configurable) loads into the system prompt as a stable block, truncated beyond 16k characters. The agent has no privileged write path: asked to remember something, it proposes a normal diff-approved edit to the memory file. `/memory` shows it, `/memory reload` re-reads it. The optional SQLite FTS layer from finding 9 remains future work.
+- The composed system prompt's real token size now feeds the compaction estimator, replacing the old fixed 500-token allowance.
+
 ### Conversation + compaction subsystem
 - Per-chat JSONL transcript on disk (Claude Code writes to `~/.claude/projects/*.jsonl`, enabling resume/fork/rewind). Each project/workspace can hold many chats; chats are isolated from project memory.
 - Token counting via `tiktoken` (estimate) or provider-reported usage (accurate). Trigger compaction at a configurable threshold (~70-80% to stay ahead of degradation). Summarize earlier turns into a `<summary>` block preserving decisions, file states, and task context; keep recent turns verbatim. Allow `/compact [instructions]`. Snapshot affected files before edits to enable rewind.
@@ -152,6 +165,8 @@ src/termcoder/
   tools/       # tool framework (Pydantic schemas) + read/list/search/write/edit/run
   approval/    # the gate: request/outcome types, unified diffs (planned name: permissions/)
   context/     # token counting, compaction
+  repomap/     # tree-sitter tags + queries, JSON tag cache, PageRank, map builder
+  memory/      # project markdown memory loader (TERMCODER.md / AGENTS.md)
   sandbox/     # host + rootless container command runners, with a factory
   snapshots/   # per-turn file snapshots and undo
   sessions/    # per-chat JSONL store + metadata sidecars
@@ -160,7 +175,7 @@ src/termcoder/
   ui/          # prompt_toolkit input + Rich rendering + REPL (planned name: tui/)
   cli.py       # Typer entrypoint
 ```
-Modules from the original plan still pending, mapped to roadmap phases: `repomap/` and agentic-search refinements plus `memory/` (Phase 3), `skills/` and `mcp/` (Phase 4), `subagents/` and the optional semantic `search/` layer (Phase 5).
+Modules from the original plan still pending, mapped to roadmap phases: `skills/` and `mcp/` (Phase 4), `subagents/` and the optional semantic `search/` layer (Phase 5).
 
 ---
 
@@ -189,7 +204,7 @@ Modules from the original plan still pending, mapped to roadmap phases: `repomap
 1. **MVP (host-only) - DONE, v0.1.0:** REPL (prompt_toolkit+Rich) -> single agent loop over LiteLLM (one cloud + Ollama) -> core tools (read/list/grep/edit) -> workspace path validation -> unified-diff approval -> per-chat JSONL history. No container yet (edits approved; code run only on explicit approval in host with warning).
 2. **Safety & context - DONE, v0.2.0:** rootless Podman execution subsystem; token counting + auto-compaction; file snapshots/undo.
    - **2.5 Audit & hardening (token economy) - DONE, v0.3.0, this revision:** per-call/turn/session usage and cost metering with `/usage` and a per-turn readout; prompt-cache-friendly context assembly plus automatic Anthropic `cache_control` breakpoints (system prompt and last user message); optional cheaper `summary_model` for compaction; bounded retry on malformed model output (the small-local-model failure from finding 12); host-mode timeout kills the whole process group; optional read-only container rootfs.
-3. **Understanding - NEXT:** tree-sitter PageRank repo map (token-budgeted, mtime-cached, injected as a stable cacheable block); ripgrep agentic search tools; project markdown memory.
+3. **Understanding - DONE, v0.4.0, this revision:** tree-sitter PageRank repo map (token-budgeted via binary search, mtime-cached as plain JSON, injected as a stable cacheable block, frozen per session, refreshed with /map refresh); agentic search completed with find_files and an include glob on search_text; project markdown memory (TERMCODER.md, AGENTS.md fallback) folded into the system prompt, edited through the normal approved file tools, shown with /memory.
 4. **Extensibility:** MCP client integration; Agent-Skills-style `SKILL.md` plugin loader with progressive disclosure; provider registry for new models; web-search skill (SearXNG default via LiteLLM `search()`, per the TL;DR).
 5. **Scale/optional:** read-only Explorer sub-agent; optional LanceDB semantic search; optional Mem0/graph memory; microVM tier for untrusted code; context-editing experiments (eliding old tool results) only if measured cache math favors them over boundary compaction.
 

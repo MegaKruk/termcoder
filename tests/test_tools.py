@@ -129,3 +129,62 @@ def test_run_command_captures_output(tmp_path):
     )
     assert result.ok
     assert "termcoder_ok" in result.content
+
+
+def test_find_files_matches_nested_paths(tmp_path):
+    from termcoder.tools.find_files import FindFilesArgs, FindFilesTool
+
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "main.py").write_text("x", encoding="utf-8")
+    (tmp_path / "src" / "util.py").write_text("x", encoding="utf-8")
+    (tmp_path / "readme.md").write_text("x", encoding="utf-8")
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "config.py").write_text("x", encoding="utf-8")
+
+    tool = FindFilesTool()
+    result = tool.execute(FindFilesArgs(pattern="*.py"), make_context(tmp_path))
+
+    assert result.ok
+    assert result.content.splitlines() == ["src/main.py", "src/util.py"]
+    assert result.display == "2 files"
+
+
+def test_find_files_caps_results(tmp_path):
+    from termcoder.tools.find_files import FindFilesArgs, FindFilesTool
+
+    for index in range(5):
+        (tmp_path / f"file_{index}.py").write_text("x", encoding="utf-8")
+
+    tool = FindFilesTool()
+    result = tool.execute(
+        FindFilesArgs(pattern="*.py", max_results=2), make_context(tmp_path)
+    )
+
+    assert "showing first 2 of 5 files" in result.content
+
+
+def test_find_files_reports_no_matches(tmp_path):
+    from termcoder.tools.find_files import FindFilesArgs, FindFilesTool
+
+    tool = FindFilesTool()
+    result = tool.execute(FindFilesArgs(pattern="*.zig"), make_context(tmp_path))
+
+    assert result.ok
+    assert result.display == "0 files"
+
+
+def test_search_text_include_filters_files(tmp_path, monkeypatch):
+    from termcoder.tools import search_text as search_module
+
+    monkeypatch.setattr(search_module.shutil, "which", lambda name: None)
+    (tmp_path / "code.py").write_text("needle = 1\n", encoding="utf-8")
+    (tmp_path / "notes.md").write_text("needle in prose\n", encoding="utf-8")
+
+    tool = SearchTextTool()
+    result = tool.execute(
+        SearchTextArgs(pattern="needle", include="*.py"), make_context(tmp_path)
+    )
+
+    assert result.ok
+    assert "code.py" in result.content
+    assert "notes.md" not in result.content

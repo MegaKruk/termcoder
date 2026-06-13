@@ -17,8 +17,9 @@ Core assistant:
 - Interactive REPL built on prompt_toolkit and Rich.
 - A single agent loop over LiteLLM that works with local Ollama models and
   cloud models (OpenAI, Anthropic) through one code path.
-- Core tools: read_file, list_directory, search_text (ripgrep with a built-in
-  fallback), write_file, edit_file, and run_command.
+- Core tools: read_file, list_directory, find_files, search_text (ripgrep
+  with a built-in fallback and a per-search include glob), write_file,
+  edit_file, and run_command.
 - Workspace confinement: every path is validated and cannot escape the
   workspace directory.
 - Approval gate: every file write and shell command shows a diff or the exact
@@ -42,6 +43,22 @@ Safety and context:
   /undo reverts the most recent turn: prior contents are restored and files the
   agent newly created are removed. Note that run_command effects are not
   snapshotted, since a command can change anything.
+
+Understanding:
+
+- Repository map. A token-budgeted overview of the most important symbols in
+  the workspace, built with tree-sitter parsing and PageRank over the file
+  reference graph, cached by file mtime, and folded into the system prompt as
+  a stable, cacheable block. It is built once per session so the prompt prefix
+  stays cache-friendly; /map shows it and /map refresh rebuilds it after big
+  changes. Eight languages out of the box: Python, JavaScript, TypeScript,
+  Go, Rust, Java, C, and C++; adding one is a single query file.
+- Project memory. The first of TERMCODER.md or AGENTS.md found in the
+  workspace is loaded into the system prompt as durable project context
+  (conventions, commands, architecture notes). It is a plain markdown file
+  you own, edit, and commit. Ask the agent to remember something and it
+  proposes an edit to that file through the normal diff approval; /memory
+  shows what is loaded and /memory reload re-reads it.
 
 Token economy:
 
@@ -82,6 +99,11 @@ Token economy:
   host.
 - Optional: tiktoken for a closer token estimate used by compaction. Without it,
   a character-based estimate is used. Install with `pip install -e ".[tokenizers]"`.
+- The repository map uses tree-sitter and tree-sitter-language-pack, which are
+  installed automatically with termcoder. The language pack is pinned below
+  1.0 on purpose: newer releases download parsers from the network at runtime,
+  which conflicts with offline use and the privacy-first principle. The 0.x
+  line bundles every parser inside the wheel.
 
 ## Install
 
@@ -130,6 +152,8 @@ python -m termcoder
 /model [name]    Show or switch the active model.
 /compact [focus] Summarize older turns now to free context space.
 /usage           Show token and cost usage for this session.
+/map [refresh]   Show the repository map, or rebuild it from the files.
+/memory [reload] Show the project memory file, or reload it from disk.
 /undo            Revert the file changes from the most recent turn.
 /tools           List the available tools.
 /clear           Clear the screen.
@@ -144,7 +168,8 @@ default model is local Ollama. See `.termcoder/config.example.toml` for the
 available keys, including how to define extra models, choose the sandbox
 backend and image, allow command network access, tune compaction thresholds,
 pick a cheaper summary model, harden the container with a read-only root
-filesystem, control prompt caching and the usage readout, and turn the
+filesystem, control prompt caching and the usage readout, size or disable the
+repository map, point project memory at different files, and turn the
 run_command tool or undo off entirely.
 
 API keys are never stored in the config file. The config only names the
@@ -179,6 +204,8 @@ src/termcoder/
   tools/           The tool framework and the built-in tools.
   sandbox/         Command runners: host and rootless container, with a factory.
   context/         Token counting and conversation compaction.
+  repomap/         Tree-sitter tag extraction, PageRank, the budgeted map.
+  memory/          Project markdown memory (TERMCODER.md / AGENTS.md).
   snapshots/       File snapshots and undo.
   llm/             Chat message helpers.
   providers/       LiteLLM client and setup (the only place LiteLLM is used).
@@ -190,5 +217,6 @@ src/termcoder/
 
 This structure leaves clear seams for later phases. The sandbox exposes a single
 runner protocol, so a stronger isolation tier (such as a microVM) can be added
-without touching the tool. A repository map and web search slot in as new
-modules, and MCP and sub-agents as additional tool sources.
+without touching the tool. Skills, MCP and web search slot in as new modules,
+and sub-agents as additional tool sources. Supporting another repo map language
+means dropping one tags query file into repomap/queries.

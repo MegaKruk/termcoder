@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "termcoder"
-version = "0.3.0"
+version = "0.4.0"
 description = "Privacy-first, terminal-native agentic coding assistant."
 readme = "README.md"
 requires-python = ">=3.14"
@@ -16,6 +16,12 @@ dependencies = [
     "prompt_toolkit>=3.0",
     "rich>=13.7",
     "typer>=0.12",
+    # Repository map. The language pack is pinned below 1.0 on purpose:
+    # 1.x releases download parsers from GitHub at runtime, which breaks
+    # offline use and conflicts with the privacy-first principle. The 0.x
+    # line bundles all parsers in the wheel.
+    "tree-sitter>=0.23,<0.26",
+    "tree-sitter-language-pack>=0.13,<1",
 ]
 
 [project.optional-dependencies]
