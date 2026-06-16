@@ -60,6 +60,26 @@ Understanding:
   proposes an edit to that file through the normal diff approval; /memory
   shows what is loaded and /memory reload re-reads it.
 
+Extensibility:
+
+- Skills. Agent-Skills-style SKILL.md folders give the agent reusable,
+  project-specific know-how. Progressive disclosure keeps this cheap: only
+  each skill's name and one-line description load at startup, the full
+  instructions load on demand when the agent calls read_skill, and bundled
+  scripts or references are opened with the ordinary file and command tools.
+  Drop folders under .termcoder/skills and list them with /skills.
+- MCP client. termcoder connects to Model Context Protocol servers running as
+  local subprocesses, and every tool they expose becomes available to the
+  agent behind the same approval gate as everything else. Tool names are
+  namespaced per server so two servers cannot collide. Configure servers under
+  mcp_servers; only add servers you trust, since their tools are
+  model-controlled.
+- Web search. An optional web_search tool reaches the web through LiteLLM's
+  unified search API, defaulting to a self-hosted SearXNG instance so queries
+  stay private. Results are treated as untrusted input: the tool labels them as
+  such, and any action the agent takes on what it reads still passes through
+  approval. Off by default; enable it under web_search.
+
 Token economy:
 
 - Usage metering. Every model call is counted, including compaction summaries.
@@ -104,6 +124,13 @@ Token economy:
   1.0 on purpose: newer releases download parsers from the network at runtime,
   which conflicts with offline use and the privacy-first principle. The 0.x
   line bundles every parser inside the wheel.
+- The MCP client (the `mcp` package) is installed automatically with termcoder.
+  Individual MCP servers are separate programs you install yourself, often run
+  with `uvx` or `npx`; you only need them if you configure any.
+- Optional: web search needs a search provider. The privacy-preserving default
+  is a local SearXNG instance (see "Web search with SearXNG" below). Other
+  LiteLLM providers (Tavily, Exa, Perplexity, and so on) work too and read
+  their API key from the environment.
 
 ## Install
 
@@ -154,6 +181,7 @@ python -m termcoder
 /usage           Show token and cost usage for this session.
 /map [refresh]   Show the repository map, or rebuild it from the files.
 /memory [reload] Show the project memory file, or reload it from disk.
+/skills          List the loaded skills.
 /undo            Revert the file changes from the most recent turn.
 /tools           List the available tools.
 /clear           Clear the screen.
@@ -169,11 +197,69 @@ available keys, including how to define extra models, choose the sandbox
 backend and image, allow command network access, tune compaction thresholds,
 pick a cheaper summary model, harden the container with a read-only root
 filesystem, control prompt caching and the usage readout, size or disable the
-repository map, point project memory at different files, and turn the
-run_command tool or undo off entirely.
+repository map, point project memory at different files, enable web search,
+add skill directories, connect MCP servers, and turn the run_command tool or
+undo off entirely.
 
 API keys are never stored in the config file. The config only names the
 environment variable that holds each key.
+
+## Web search with SearXNG
+
+Web search is off by default. The recommended provider is SearXNG, a
+self-hostable meta-search engine, so your queries are not sent to a tracking
+search service. The quickest way to run one locally is Docker:
+
+```
+docker run -d --name searxng -p 8080:8080 searxng/searxng
+```
+
+SearXNG must return JSON for the API to work. Enable the JSON format in its
+settings, for example by adding this to the instance's `settings.yml` (in the
+container, `/etc/searxng/settings.yml`) and restarting:
+
+```
+search:
+  formats:
+    - html
+    - json
+```
+
+Then enable web search in `.termcoder/config.toml`:
+
+```
+[web_search]
+enabled = true
+provider = "searxng"
+api_base = "http://localhost:8080"
+```
+
+Alternatively, set the `SEARXNG_API_BASE` environment variable instead of
+`api_base`. To use a hosted provider instead of SearXNG, set `provider` to one
+LiteLLM supports (such as `tavily`, `exa`, or `perplexity`) and export that
+provider's API key; no SearXNG instance is then needed.
+
+## MCP servers
+
+termcoder can connect to Model Context Protocol servers to gain extra tools.
+Servers run as local subprocesses and their tools appear to the agent behind
+the approval gate. For example, to add a filesystem and a git server:
+
+```
+[[mcp_servers]]
+name = "files"
+command = "uvx"
+args = ["mcp-server-filesystem", "."]
+
+[[mcp_servers]]
+name = "git"
+command = "uvx"
+args = ["mcp-server-git"]
+```
+
+Each server's tools are namespaced as `mcp_<server>_<tool>`. Only configure
+servers from sources you trust: MCP tools are model-controlled and are an
+external supply-chain surface.
 
 ## Test
 
@@ -206,6 +292,9 @@ src/termcoder/
   context/         Token counting and conversation compaction.
   repomap/         Tree-sitter tag extraction, PageRank, the budgeted map.
   memory/          Project markdown memory (TERMCODER.md / AGENTS.md).
+  skills/          SKILL.md loader and the read_skill tool (progressive disclosure).
+  mcp/             MCP client and adapters that wrap server tools as tools.
+  web/             Web search tool over LiteLLM's unified search API.
   snapshots/       File snapshots and undo.
   llm/             Chat message helpers.
   providers/       LiteLLM client and setup (the only place LiteLLM is used).
@@ -217,6 +306,7 @@ src/termcoder/
 
 This structure leaves clear seams for later phases. The sandbox exposes a single
 runner protocol, so a stronger isolation tier (such as a microVM) can be added
-without touching the tool. Skills, MCP and web search slot in as new modules,
-and sub-agents as additional tool sources. Supporting another repo map language
-means dropping one tags query file into repomap/queries.
+without touching the tool. Skills, MCP, and web search are now their own
+modules, and a future read-only Explorer sub-agent would slot in as another
+tool source. Supporting another repo map language means dropping one tags query
+file into repomap/queries.

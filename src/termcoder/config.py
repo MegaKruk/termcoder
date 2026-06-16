@@ -126,6 +126,53 @@ class MemorySettings:
 
 
 @dataclass(frozen=True)
+class WebSearchSettings:
+    """Settings for the optional web search tool.
+
+    Web search is off by default because it reaches the network. When enabled,
+    the default provider is SearXNG, a self-hostable meta-search engine, so a
+    local instance keeps queries private. ``api_base`` points at that instance;
+    when empty, LiteLLM reads SEARXNG_API_BASE from the environment.
+    """
+
+    enabled: bool = False
+    provider: str = "searxng"
+    api_base: str = ""
+
+
+@dataclass(frozen=True)
+class SkillSettings:
+    """Settings for Agent-Skills-style SKILL.md loading.
+
+    Skills are discovered under each directory in ``directories``, resolved
+    relative to the workspace. The default puts them in the workspace config
+    directory so they travel with the project.
+    """
+
+    enabled: bool = True
+    directories: tuple[str, ...] = (".termcoder/skills",)
+
+
+@dataclass(frozen=True)
+class MCPServerConfig:
+    """Connection settings for a single MCP server (stdio transport).
+
+    The server runs as a local subprocess: ``command`` plus ``args``, with an
+    optional ``env`` and working directory. Keeping servers local is the
+    privacy-preserving default; only configure servers from trusted sources,
+    since their tools are model-controlled.
+    """
+
+    name: str
+    command: str
+    args: tuple[str, ...] = ()
+    env: dict[str, str] = field(default_factory=dict)
+    cwd: str | None = None
+    enabled: bool = True
+    startup_timeout: float = 30.0
+
+
+@dataclass(frozen=True)
 class AppConfig:
     """Top-level runtime configuration for a single workspace."""
 
@@ -142,6 +189,9 @@ class AppConfig:
     context: ContextSettings = field(default_factory=ContextSettings)
     repomap: RepoMapSettings = field(default_factory=RepoMapSettings)
     memory: MemorySettings = field(default_factory=MemorySettings)
+    web_search: WebSearchSettings = field(default_factory=WebSearchSettings)
+    skills: SkillSettings = field(default_factory=SkillSettings)
+    mcp_servers: tuple[MCPServerConfig, ...] = ()
 
     def model(self) -> ModelConfig:
         """Return the currently selected model configuration."""
@@ -175,6 +225,9 @@ class AppConfig:
             context=self.context,
             repomap=self.repomap,
             memory=self.memory,
+            web_search=self.web_search,
+            skills=self.skills,
+            mcp_servers=self.mcp_servers,
         )
 
     @property
@@ -291,6 +344,68 @@ def _context_from_toml(raw: dict) -> ContextSettings:
     )
 
 
+def _web_search_from_toml(raw: dict) -> WebSearchSettings:
+    """Build WebSearchSettings from a TOML table, falling back to defaults."""
+    base = WebSearchSettings()
+    return WebSearchSettings(
+        enabled=bool(raw.get("enabled", base.enabled)),
+        provider=str(raw.get("provider", base.provider)),
+        api_base=str(raw.get("api_base", base.api_base)),
+    )
+
+
+def _skills_from_toml(raw: dict) -> SkillSettings:
+    """Build SkillSettings from a TOML table, falling back to defaults."""
+    base = SkillSettings()
+    directories = raw.get("directories", list(base.directories))
+    if isinstance(directories, str):
+        directories = [directories]
+    return SkillSettings(
+        enabled=bool(raw.get("enabled", base.enabled)),
+        directories=tuple(
+            str(name) for name in directories if str(name).strip()
+        ),
+    )
+
+
+def _mcp_servers_from_toml(raw: object) -> tuple[MCPServerConfig, ...]:
+    """Build MCP server configs from a list of TOML tables.
+
+    Each table needs a ``name`` and a ``command``; malformed entries raise a
+    ConfigError so problems surface at load time rather than during a session.
+    """
+    if not raw:
+        return ()
+    if not isinstance(raw, list):
+        raise ConfigError("mcp_servers must be a list of server tables.")
+    servers: list[MCPServerConfig] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            raise ConfigError("Each MCP server must be a table of settings.")
+        name = str(entry.get("name", "")).strip()
+        command = str(entry.get("command", "")).strip()
+        if not name or not command:
+            raise ConfigError("Each MCP server needs a name and a command.")
+        args = entry.get("args", [])
+        if isinstance(args, str):
+            args = [args]
+        env = entry.get("env", {})
+        if not isinstance(env, dict):
+            raise ConfigError(f"MCP server '{name}' env must be a table.")
+        servers.append(
+            MCPServerConfig(
+                name=name,
+                command=command,
+                args=tuple(str(item) for item in args),
+                env={str(key): str(value) for key, value in env.items()},
+                cwd=str(entry["cwd"]) if entry.get("cwd") else None,
+                enabled=bool(entry.get("enabled", True)),
+                startup_timeout=float(entry.get("startup_timeout", 30.0)),
+            )
+        )
+    return tuple(servers)
+
+
 def load_config(workspace: Path, model_override: str | None = None) -> AppConfig:
     """Load configuration for a workspace, merging file settings over defaults.
 
@@ -328,4 +443,7 @@ def load_config(workspace: Path, model_override: str | None = None) -> AppConfig
         context=_context_from_toml(data.get("context") or {}),
         repomap=_repomap_from_toml(data.get("repomap") or {}),
         memory=_memory_from_toml(data.get("memory") or {}),
+        web_search=_web_search_from_toml(data.get("web_search") or {}),
+        skills=_skills_from_toml(data.get("skills") or {}),
+        mcp_servers=_mcp_servers_from_toml(data.get("mcp_servers")),
     )

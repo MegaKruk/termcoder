@@ -84,3 +84,38 @@ cache_prompts = false
     assert config.models["gpt"].cache_prompts is False
     # Untouched models keep the default.
     assert config.models["ollama"].cache_prompts is True
+
+
+def test_web_search_tool_added_when_enabled(tmp_path):
+    from dataclasses import replace
+    from termcoder.config import WebSearchSettings
+
+    config = _config(tmp_path)
+    config = replace(config, web_search=WebSearchSettings(enabled=True))
+    registry = build_default_registry(config)
+    assert "web_search" in registry.names()
+
+
+def test_web_search_tool_absent_by_default(tmp_path):
+    registry = build_default_registry(_config(tmp_path))
+    assert "web_search" not in registry.names()
+
+
+def test_read_skill_tool_added_with_skills(tmp_path):
+    from termcoder.skills import SkillRegistry
+
+    skill_dir = tmp_path / "skills" / "demo"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: A demo skill.\n---\n\nBody.", encoding="utf-8"
+    )
+    skills = SkillRegistry.from_directories([tmp_path / "skills"])
+    registry = build_default_registry(_config(tmp_path), skills=skills)
+    assert "read_skill" in registry.names()
+
+
+def test_read_skill_tool_absent_without_skills(tmp_path):
+    from termcoder.skills import SkillRegistry
+
+    registry = build_default_registry(_config(tmp_path), skills=SkillRegistry())
+    assert "read_skill" not in registry.names()

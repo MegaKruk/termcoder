@@ -19,12 +19,14 @@ from ..agent.system_prompt import build_system_prompt
 from ..config import AppConfig
 from ..context import ContextManager, TokenCounter
 from ..errors import ConfigError, ProviderError, TermcoderError
+from ..mcp import MCPClient, register_mcp_tools
 from ..memory.loader import ProjectMemory, load_project_memory
 from ..providers.llm_client import LLMClient
 from ..providers.usage import UsageTracker
 from ..repomap.builder import RepoMapBuilder, RepoMapResult
 from ..sandbox.runner import build_command_runner
 from ..sessions.store import SessionStore
+from ..skills import SkillRegistry
 from ..snapshots.store import NullSnapshotStore, SnapshotStore
 from ..tools import build_default_registry
 from ..tools.base import ToolContext
@@ -33,19 +35,20 @@ from .approver import ConsoleApprover
 from .renderer import Renderer
 
 _HELP = """Commands:
-  /help\t\t\thow this help.
-  /new\t\t\tStart a new chat session.
-  /sessions\t\tList chat sessions for this workspace.
-  /resume <id>\t\tResume a previous session by id.
-  /model [name]\t\tShow the active model, or switch to another configured one.
-  /compact [focus]\t\tSummarize older turns now to free context space.
-  /usage\t\tShow token and cost usage for this session.
-  /map [refresh]\t\t\tShow the repository map, or rebuild it from the files.
-  /memory [reload]\t\tShow the project memory file, or reload it from disk.
-  /undo\t\t\tRevert the file changes from the most recent turn.
-  /tools\t\tList the available tools.
-  /clear\t\tClear the screen.
-  /exit, /quit\t\tLeave termcoder.
+  /help                Show this help.
+  /new                 Start a new chat session.
+  /sessions            List chat sessions for this workspace.
+  /resume <id>         Resume a previous session by id.
+  /model [name]        Show the active model, or switch to another configured one.
+  /compact [focus]     Summarize older turns now to free context space.
+  /usage               Show token and cost usage for this session.
+  /map [refresh]       Show the repository map, or rebuild it from the files.
+  /memory [reload]     Show the project memory file, or reload it from disk.
+  /skills              List the loaded skills.
+  /undo                Revert the file changes from the most recent turn.
+  /tools               List the available tools.
+  /clear               Clear the screen.
+  /exit, /quit         Leave termcoder.
 """
 
 
@@ -62,7 +65,12 @@ class Repl:
         self._store = SessionStore(config.sessions_dir)
         self._workspace = WorkspaceGuard(config.workspace)
         self._runner = build_command_runner(config.sandbox, config.workspace)
-        self._tools = build_default_registry(config, command_runner=self._runner)
+        self._skills = self._load_skills()
+        self._tools = build_default_registry(
+            config, command_runner=self._runner, skills=self._skills
+        )
+        self._mcp_client: MCPClient | None = None
+        self._mcp_tool_count = self._connect_mcp_servers()
         self._context = ToolContext(
             workspace=self._workspace,
             approver=self._approver,
@@ -88,6 +96,13 @@ class Repl:
             self._config.workspace, self._llm.model_name, sandbox=self._sandbox_label()
         )
         self._show_understanding_status()
+        try:
+            self._loop()
+        finally:
+            self._close()
+        self._renderer.info("Goodbye.")
+
+    def _loop(self) -> None:
         while True:
             try:
                 line = self._prompt.prompt("you> ")
@@ -103,7 +118,12 @@ class Repl:
                     break
                 continue
             self._run_turn(line)
-        self._renderer.info("Goodbye.")
+
+    def _close(self) -> None:
+        """Release resources held for the session, such as MCP servers."""
+        if self._mcp_client is not None:
+            self._mcp_client.close()
+            self._mcp_client = None
 
     def _run_turn(self, line: str) -> None:
         self._usage.begin_turn()
@@ -159,6 +179,29 @@ class Repl:
             return None
         return load_project_memory(self._config.workspace, settings.files)
 
+    def _load_skills(self) -> SkillRegistry:
+        settings = self._config.skills
+        if not settings.enabled or not settings.directories:
+            return SkillRegistry()
+        directories = [
+            self._config.workspace / name for name in settings.directories
+        ]
+        return SkillRegistry.from_directories(directories)
+
+    def _connect_mcp_servers(self) -> int:
+        """Connect configured MCP servers and register their tools.
+
+        Returns the number of tools registered. A failure to reach one server
+        is reported and skipped so the session still starts.
+        """
+        servers = [server for server in self._config.mcp_servers if server.enabled]
+        if not servers:
+            return 0
+        self._mcp_client = MCPClient()
+        return register_mcp_tools(
+            self._tools, self._mcp_client, servers, self._renderer.status
+        )
+
     def _build_repo_map(self) -> RepoMapResult | None:
         settings = self._config.repomap
         if not settings.enabled:
@@ -180,6 +223,7 @@ class Repl:
             platform.system(),
             memory=self._memory,
             repo_map=map_text,
+            skill_catalog=self._skills.catalog(),
         )
 
     def _show_understanding_status(self) -> None:
@@ -196,6 +240,14 @@ class Repl:
                 )
             else:
                 self._renderer.status(f"repo map: off ({self._repo_map.reason})")
+        if len(self._skills) > 0:
+            self._renderer.status(f"skills: {len(self._skills)} loaded")
+        if self._config.web_search.enabled:
+            self._renderer.status(
+                f"web search: on ({self._config.web_search.provider})"
+            )
+        if self._mcp_tool_count > 0:
+            self._renderer.status(f"mcp: {self._mcp_tool_count} tool(s)")
 
     def _build_context_manager(self) -> ContextManager:
         settings = self._config.context
@@ -265,6 +317,8 @@ class Repl:
             self._cmd_map(argument)
         elif command == "/memory":
             self._cmd_memory(argument)
+        elif command == "/skills":
+            self._cmd_skills()
         elif command == "/undo":
             self._cmd_undo()
         elif command == "/tools":
@@ -391,6 +445,19 @@ class Repl:
         for tool in self._tools:
             kind = "read-only" if tool.is_read_only else "needs approval"
             self._renderer.plain(f"  {tool.name:16s} {kind}")
+
+    def _cmd_skills(self) -> None:
+        if len(self._skills) == 0:
+            directories = ", ".join(self._config.skills.directories) or "(none)"
+            self._renderer.info(
+                "No skills loaded. Add SKILL.md folders under one of these "
+                f"directories: {directories}."
+            )
+            return
+        self._renderer.info(f"{len(self._skills)} skill(s) loaded:")
+        for name in self._skills.names():
+            skill = self._skills.get(name)
+            self._renderer.plain(f"  {name}: {skill.description}")
 
 
 def run_repl(config: AppConfig) -> None:

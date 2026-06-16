@@ -23,6 +23,7 @@ def build_system_prompt(
     os_name: str,
     memory: ProjectMemory | None = None,
     repo_map: str | None = None,
+    skill_catalog: str | None = None,
 ) -> str:
     """Return the system prompt for an interactive coding session."""
     tools = ", ".join(tool_names)
@@ -71,4 +72,6 @@ def build_system_prompt(
             "a snapshot from session start; read files for current details):\n"
             f"{repo_map}"
         )
+    if skill_catalog:
+        parts.append(skill_catalog)
     return "\n\n".join(parts)

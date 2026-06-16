@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "termcoder"
-version = "0.4.0"
+version = "0.5.0"
 description = "Privacy-first, terminal-native agentic coding assistant."
 readme = "README.md"
 requires-python = ">=3.14"
@@ -22,6 +22,12 @@ dependencies = [
     # line bundles all parsers in the wheel.
     "tree-sitter>=0.23,<0.26",
     "tree-sitter-language-pack>=0.13,<1",
+    # MCP client for connecting to external tool servers over stdio.
+    "mcp>=1.27,<2",
+    # Required by litellm.search provider initialization (the Brave search
+    # config imports dateutil at module load, even when another provider such
+    # as SearXNG is selected).
+    "python-dateutil>=2.8",
 ]
 
 [project.optional-dependencies]

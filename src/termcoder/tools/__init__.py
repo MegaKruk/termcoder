@@ -46,14 +46,18 @@ __all__ = [
 
 
 def build_default_registry(
-    config: AppConfig, command_runner: CommandRunner | None = None
+    config: AppConfig, command_runner: CommandRunner | None = None, skills=None
 ) -> ToolRegistry:
     """Create a registry with the standard tool set.
 
     The run_command tool is wired to a command runner. When one is not provided,
     it is built from the sandbox configuration, so the same call works in tests
-    and at runtime.
+    and at runtime. Optional capabilities are added when configured: a web
+    search tool when ``web_search`` is enabled, and a read_skill tool when a
+    non-empty skill registry is supplied.
     """
+    from ..web import build_web_search_tool
+
     registry = ToolRegistry()
     registry.register(ReadFileTool())
     registry.register(ListDirectoryTool())
@@ -64,4 +68,11 @@ def build_default_registry(
     if config.allow_run_command:
         runner = command_runner or build_command_runner(config.sandbox, config.workspace)
         registry.register(RunCommandTool(runner=runner))
+    web_tool = build_web_search_tool(config.web_search)
+    if web_tool is not None:
+        registry.register(web_tool)
+    if skills is not None and len(skills) > 0:
+        from ..skills import ReadSkillTool
+
+        registry.register(ReadSkillTool(skills))
     return registry
