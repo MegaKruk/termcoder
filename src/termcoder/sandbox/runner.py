@@ -30,6 +30,20 @@ from ..errors import ConfigError
 _HOST_TIMEOUT_SLACK_SECONDS = 15
 
 
+def _process_creation_kwargs() -> dict:
+    """Return Popen kwargs that isolate the child so a timeout can kill its tree.
+
+    On POSIX, a new session makes the child its own process group leader, so
+    the whole group can be signalled. On Windows, a new process group is the
+    closest standard-library equivalent.
+    """
+    if os.name == "posix":
+        return {"start_new_session": True}
+    creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    return {"creationflags": creationflags}
+
+
+
 @dataclass
 class CommandResult:
     """The outcome of running a single command."""
@@ -87,12 +101,15 @@ class HostCommandRunner:
         return "This command runs directly on your host with no sandbox."
 
     def run(self, command: str, timeout: int) -> CommandResult:
-        """Run the command in its own process group, so a timeout kills it all.
+        """Run the command, killing the whole process tree on timeout.
 
         ``subprocess.run(timeout=...)`` only kills the immediate child; any
-        background children it spawned would survive. Starting a new session
-        and killing the process group closes that gap.
+        background children it spawned would survive. On POSIX the child starts
+        a new session so the process group can be signalled; on Windows a job
+        is approximated by terminating the child, which is the best the standard
+        library offers without extra dependencies.
         """
+        creation = _process_creation_kwargs()
         process = subprocess.Popen(
             command,
             shell=True,
@@ -100,12 +117,12 @@ class HostCommandRunner:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            start_new_session=True,
+            **creation,
         )
         try:
             stdout, stderr = process.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
-            self._kill_group(process)
+            self._kill_tree(process)
             return CommandResult(
                 returncode=124,
                 stdout="",
@@ -121,9 +138,14 @@ class HostCommandRunner:
         )
 
     @staticmethod
-    def _kill_group(process: subprocess.Popen) -> None:
+    def _kill_tree(process: subprocess.Popen) -> None:
         try:
-            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            if os.name == "posix":
+                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            else:
+                # Windows: terminate the child; CREATE_NEW_PROCESS_GROUP limits
+                # stray children but there is no portable group kill.
+                process.kill()
         except (ProcessLookupError, PermissionError, OSError):
             process.kill()
         try:

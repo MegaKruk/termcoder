@@ -79,6 +79,27 @@ Extensibility:
   stay private. Results are treated as untrusted input: the tool labels them as
   such, and any action the agent takes on what it reads still passes through
   approval. Off by default; enable it under web_search.
+- Semantic code search (optional). When enabled, the workspace is chunked and
+  embedded into a local LanceDB index, and a semantic_search tool finds code by
+  meaning rather than exact text. Embeddings come from a local Ollama model by
+  default, so code never leaves your machine. Agentic grep stays the primary
+  tool; this helps on large codebases. Off by default; enable under
+  semantic_search and rebuild the index with /index.
+
+Memory and structure:
+
+- Structured project memory. TERMCODER.md is parsed into sections by its
+  markdown headings, so a large memory file stays navigable: /memory shows a
+  section outline, /memory <name> shows one section, and the agent is told the
+  section names so it adds new notes under the right heading. A flat file with
+  no headings keeps working unchanged.
+- Automatic secret loading. If the workspace has a .env file, termcoder loads
+  it at startup, so API keys do not have to be re-exported in every new
+  terminal. Values already set in your shell take precedence, and .env should
+  be git-ignored. See .env.example.
+- Cross-platform. termcoder detects the OS and shell and adapts: it tells the
+  model to use PowerShell syntax on Windows and POSIX shell syntax on Linux and
+  macOS, and the host command runner stops processes correctly on each.
 
 Token economy:
 
@@ -131,6 +152,11 @@ Token economy:
   is a local SearXNG instance (see "Web search with SearXNG" below). Other
   LiteLLM providers (Tavily, Exa, Perplexity, and so on) work too and read
   their API key from the environment.
+- Optional: semantic search needs the `semantic` extra (LanceDB) and an
+  embedding model. The default is a local Ollama model; pull it once with
+  `ollama pull nomic-embed-text`. Install the extra with
+  `pip install -e ".[semantic]"`. Without it, semantic search stays off and
+  nothing else changes.
 
 ## Install
 
@@ -140,7 +166,9 @@ From the project root:
 pip install -e .
 ```
 
-This installs the `termcoder` command.
+This installs the `termcoder` command. To include optional features, add the
+extras you want, for example `pip install -e ".[semantic]"` for semantic search
+or `pip install -e ".[dev]"` for the test tools.
 
 ## Run
 
@@ -169,6 +197,36 @@ You can also run it without installing:
 python -m termcoder
 ```
 
+### Windows
+
+termcoder runs on Windows 11 the same way. In PowerShell:
+
+```
+termcoder chat --workspace C:\path\to\project --model gpt
+```
+
+termcoder detects that it is running under PowerShell and instructs the model
+to use PowerShell syntax for any commands it proposes. The command sandbox uses
+a container engine when one is available (Docker Desktop or Podman); otherwise
+commands run on the host with approval, exactly as on Linux. Set environment
+variables for the session with `$env:OPENAI_API_KEY = "sk-..."`, or put them in
+a `.env` file in the workspace (see below) so they load automatically.
+
+### Secrets and .env
+
+API keys are read from the environment and never stored in config. To avoid
+re-exporting them in every new terminal, put them in a `.env` file in the
+workspace root:
+
+```
+OPENAI_API_KEY=sk-your-key
+SEARXNG_API_BASE=http://localhost:8080
+```
+
+termcoder loads this file at startup and sets any variable that is not already
+defined, so an explicit export still wins. Keep `.env` out of version control.
+See `.env.example` for the format.
+
 ### In-chat commands
 
 ```
@@ -182,6 +240,7 @@ python -m termcoder
 /map [refresh]   Show the repository map, or rebuild it from the files.
 /memory [reload] Show the project memory file, or reload it from disk.
 /skills          List the loaded skills.
+/index           Rebuild the semantic search index (when enabled).
 /undo            Revert the file changes from the most recent turn.
 /tools           List the available tools.
 /clear           Clear the screen.
@@ -239,27 +298,59 @@ Alternatively, set the `SEARXNG_API_BASE` environment variable instead of
 LiteLLM supports (such as `tavily`, `exa`, or `perplexity`) and export that
 provider's API key; no SearXNG instance is then needed.
 
+## Semantic search
+
+Semantic search is optional and off by default. It lets the agent find code by
+meaning ("where do we validate user input") instead of an exact grep term,
+which helps on large codebases. Everything runs locally.
+
+Install the extra and pull a local embedding model:
+
+```
+pip install -e ".[semantic]"
+ollama pull nomic-embed-text
+```
+
+Enable it in `.termcoder/config.toml`:
+
+```
+[semantic_search]
+enabled = true
+model = "ollama/nomic-embed-text"
+auto_index = true
+```
+
+On the next start, termcoder builds the index from the workspace (the first
+build can take a moment on a large repo) and adds a `semantic_search` tool.
+Rebuild the index at any time with `/index`, for example after large changes.
+If LanceDB or the embedding model is unavailable, semantic search reports why
+and the rest of termcoder is unaffected.
+
 ## MCP servers
 
 termcoder can connect to Model Context Protocol servers to gain extra tools.
 Servers run as local subprocesses and their tools appear to the agent behind
-the approval gate. For example, to add a filesystem and a git server:
+the approval gate. For example, to add the official git and fetch servers
+(both published on PyPI and run with uvx, which comes with uv):
 
 ```
-[[mcp_servers]]
-name = "files"
-command = "uvx"
-args = ["mcp-server-filesystem", "."]
-
 [[mcp_servers]]
 name = "git"
 command = "uvx"
-args = ["mcp-server-git"]
+args = ["mcp-server-git", "--repository", "."]
+
+[[mcp_servers]]
+name = "fetch"
+command = "uvx"
+args = ["mcp-server-fetch"]
 ```
 
-Each server's tools are namespaced as `mcp_<server>_<tool>`. Only configure
-servers from sources you trust: MCP tools are model-controlled and are an
-external supply-chain surface.
+Each server's tools are namespaced as `mcp_<server>_<tool>`. The command
+(`uvx` here, `npx` for Node-based servers) must be installed and on your PATH.
+If a server fails to start with a "not found in registry" message, the package
+name is wrong or unavailable, not termcoder; check the server's current name on
+PyPI or npm. Only configure servers from sources you trust: MCP tools are
+model-controlled and are an external supply-chain surface.
 
 ## Test
 
@@ -295,6 +386,9 @@ src/termcoder/
   skills/          SKILL.md loader and the read_skill tool (progressive disclosure).
   mcp/             MCP client and adapters that wrap server tools as tools.
   web/             Web search tool over LiteLLM's unified search API.
+  semantic/        Optional LanceDB semantic code search (chunker, index, tool).
+  platform_info.py OS and shell detection for prompts and command execution.
+  config_env.py    Loads a workspace .env file into the environment.
   snapshots/       File snapshots and undo.
   llm/             Chat message helpers.
   providers/       LiteLLM client and setup (the only place LiteLLM is used).

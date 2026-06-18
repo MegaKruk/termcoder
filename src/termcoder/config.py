@@ -154,6 +154,25 @@ class SkillSettings:
 
 
 @dataclass(frozen=True)
+class SemanticSearchSettings:
+    """Settings for optional local semantic code search.
+
+    Off by default: it needs an embedding model (local Ollama by default, so
+    code never leaves the machine) and adds an indexing step. When enabled, the
+    workspace is chunked and embedded into a local LanceDB table, and a
+    semantic_search tool lets the agent retrieve by meaning rather than exact
+    text. Agentic grep (search_text) remains the primary tool; this helps on
+    large codebases where the right keyword is not known.
+    """
+
+    enabled: bool = False
+    model: str = "ollama/nomic-embed-text"
+    api_base: str = ""
+    max_results: int = 5
+    auto_index: bool = True
+
+
+@dataclass(frozen=True)
 class MCPServerConfig:
     """Connection settings for a single MCP server (stdio transport).
 
@@ -191,6 +210,9 @@ class AppConfig:
     memory: MemorySettings = field(default_factory=MemorySettings)
     web_search: WebSearchSettings = field(default_factory=WebSearchSettings)
     skills: SkillSettings = field(default_factory=SkillSettings)
+    semantic_search: SemanticSearchSettings = field(
+        default_factory=SemanticSearchSettings
+    )
     mcp_servers: tuple[MCPServerConfig, ...] = ()
 
     def model(self) -> ModelConfig:
@@ -227,6 +249,7 @@ class AppConfig:
             memory=self.memory,
             web_search=self.web_search,
             skills=self.skills,
+            semantic_search=self.semantic_search,
             mcp_servers=self.mcp_servers,
         )
 
@@ -368,6 +391,18 @@ def _skills_from_toml(raw: dict) -> SkillSettings:
     )
 
 
+def _semantic_search_from_toml(raw: dict) -> SemanticSearchSettings:
+    """Build SemanticSearchSettings from a TOML table, falling back to defaults."""
+    base = SemanticSearchSettings()
+    return SemanticSearchSettings(
+        enabled=bool(raw.get("enabled", base.enabled)),
+        model=str(raw.get("model", base.model)),
+        api_base=str(raw.get("api_base", base.api_base)),
+        max_results=int(raw.get("max_results", base.max_results)),
+        auto_index=bool(raw.get("auto_index", base.auto_index)),
+    )
+
+
 def _mcp_servers_from_toml(raw: object) -> tuple[MCPServerConfig, ...]:
     """Build MCP server configs from a list of TOML tables.
 
@@ -376,6 +411,12 @@ def _mcp_servers_from_toml(raw: object) -> tuple[MCPServerConfig, ...]:
     """
     if not raw:
         return ()
+    if isinstance(raw, dict):
+        raise ConfigError(
+            "mcp_servers must be a list of server tables. In TOML, write each "
+            "server with a double-bracket header '[[mcp_servers]]', not a "
+            "single-bracket '[mcp_servers]'."
+        )
     if not isinstance(raw, list):
         raise ConfigError("mcp_servers must be a list of server tables.")
     servers: list[MCPServerConfig] = []
@@ -445,5 +486,6 @@ def load_config(workspace: Path, model_override: str | None = None) -> AppConfig
         memory=_memory_from_toml(data.get("memory") or {}),
         web_search=_web_search_from_toml(data.get("web_search") or {}),
         skills=_skills_from_toml(data.get("skills") or {}),
+        semantic_search=_semantic_search_from_toml(data.get("semantic_search") or {}),
         mcp_servers=_mcp_servers_from_toml(data.get("mcp_servers")),
     )

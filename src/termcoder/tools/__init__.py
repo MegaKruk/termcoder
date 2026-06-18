@@ -46,15 +46,19 @@ __all__ = [
 
 
 def build_default_registry(
-    config: AppConfig, command_runner: CommandRunner | None = None, skills=None
+    config: AppConfig,
+    command_runner: CommandRunner | None = None,
+    skills=None,
+    semantic_index=None,
 ) -> ToolRegistry:
     """Create a registry with the standard tool set.
 
     The run_command tool is wired to a command runner. When one is not provided,
     it is built from the sandbox configuration, so the same call works in tests
     and at runtime. Optional capabilities are added when configured: a web
-    search tool when ``web_search`` is enabled, and a read_skill tool when a
-    non-empty skill registry is supplied.
+    search tool when ``web_search`` is enabled, a read_skill tool when a
+    non-empty skill registry is supplied, and a semantic_search tool when a
+    semantic index is supplied.
     """
     from ..web import build_web_search_tool
 
@@ -75,4 +79,8 @@ def build_default_registry(
         from ..skills import ReadSkillTool
 
         registry.register(ReadSkillTool(skills))
+    if semantic_index is not None:
+        from ..semantic import SemanticSearchTool
+
+        registry.register(SemanticSearchTool(semantic_index, config.semantic_search))
     return registry

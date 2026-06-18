@@ -45,11 +45,16 @@ def chat(
     model: str | None = _MODEL_OPTION,
 ) -> None:
     """Start an interactive coding session."""
+    from .config_env import load_env_file
     from .ui.repl import run_repl
 
+    workspace_path = _workspace(workspace)
+    loaded = load_env_file(workspace_path)
+    if loaded:
+        typer.echo(f"Loaded {len(loaded)} secret(s) from .env: {', '.join(loaded)}")
     configure_litellm()
     try:
-        config = load_config(_workspace(workspace), model_override=model)
+        config = load_config(workspace_path, model_override=model)
     except TermcoderError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1)

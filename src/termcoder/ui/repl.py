@@ -9,7 +9,6 @@ which keeps every other module small and independent.
 
 from __future__ import annotations
 
-import platform
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
@@ -21,10 +20,12 @@ from ..context import ContextManager, TokenCounter
 from ..errors import ConfigError, ProviderError, TermcoderError
 from ..mcp import MCPClient, register_mcp_tools
 from ..memory.loader import ProjectMemory, load_project_memory
+from ..platform_info import detect_platform
 from ..providers.llm_client import LLMClient
 from ..providers.usage import UsageTracker
 from ..repomap.builder import RepoMapBuilder, RepoMapResult
 from ..sandbox.runner import build_command_runner
+from ..semantic import SemanticIndex, lancedb_available
 from ..sessions.store import SessionStore
 from ..skills import SkillRegistry
 from ..snapshots.store import NullSnapshotStore, SnapshotStore
@@ -39,12 +40,13 @@ _HELP = """Commands:
   /new                 Start a new chat session.
   /sessions            List chat sessions for this workspace.
   /resume <id>         Resume a previous session by id.
-  /model [name]        Show the active model, or switch to another configured one.
-  /compact [focus]     Summarize older turns now to free context space.
+  /model [name]              Show the active model, or switch to another configured one.
+  /compact [focus]            Summarize older turns now to free context space.
   /usage               Show token and cost usage for this session.
-  /map [refresh]       Show the repository map, or rebuild it from the files.
-  /memory [reload]     Show the project memory file, or reload it from disk.
+  /map [refresh]                Show the repository map, or rebuild it from the files.
+  /memory [reload]             Show the project memory file, or reload it from disk.
   /skills              List the loaded skills.
+  /index               Rebuild the semantic search index (when enabled).
   /undo                Revert the file changes from the most recent turn.
   /tools               List the available tools.
   /clear               Clear the screen.
@@ -66,8 +68,12 @@ class Repl:
         self._workspace = WorkspaceGuard(config.workspace)
         self._runner = build_command_runner(config.sandbox, config.workspace)
         self._skills = self._load_skills()
+        self._semantic_index = self._build_semantic_index()
         self._tools = build_default_registry(
-            config, command_runner=self._runner, skills=self._skills
+            config,
+            command_runner=self._runner,
+            skills=self._skills,
+            semantic_index=self._semantic_index,
         )
         self._mcp_client: MCPClient | None = None
         self._mcp_tool_count = self._connect_mcp_servers()
@@ -95,12 +101,27 @@ class Repl:
         self._renderer.banner(
             self._config.workspace, self._llm.model_name, sandbox=self._sandbox_label()
         )
+        self._maybe_auto_index()
         self._show_understanding_status()
         try:
             self._loop()
         finally:
             self._close()
         self._renderer.info("Goodbye.")
+
+    def _maybe_auto_index(self) -> None:
+        """Build the semantic index at startup if enabled and set to auto."""
+        if self._semantic_index is None or not self._config.semantic_search.auto_index:
+            return
+        self._renderer.status("semantic search: building index (first run may be slow)")
+        status = self._semantic_index.build()
+        if status.ok:
+            self._renderer.status(
+                f"semantic search: indexed {status.chunk_count} chunks from "
+                f"{status.file_count} files"
+            )
+        else:
+            self._renderer.status(f"semantic search: not indexed ({status.reason})")
 
     def _loop(self) -> None:
         while True:
@@ -188,6 +209,23 @@ class Repl:
         ]
         return SkillRegistry.from_directories(directories)
 
+    def _build_semantic_index(self) -> SemanticIndex | None:
+        """Create the semantic index when the feature is enabled and available."""
+        settings = self._config.semantic_search
+        if not settings.enabled:
+            return None
+        if not lancedb_available():
+            self._renderer.status(
+                "semantic search: enabled in config but LanceDB is not "
+                "installed (install the 'semantic' extra)"
+            )
+            return None
+        return SemanticIndex(
+            root=self._config.workspace,
+            db_path=self._config.cache_dir / "semantic",
+            settings=settings,
+        )
+
     def _connect_mcp_servers(self) -> int:
         """Connect configured MCP servers and register their tools.
 
@@ -217,13 +255,15 @@ class Repl:
     def _compose_system_prompt(self) -> str:
         """Compose the full, session-stable system prompt."""
         map_text = self._repo_map.text if self._repo_map else None
+        platform_info = detect_platform()
         return build_system_prompt(
             self._workspace.root,
             self._tools.names(),
-            platform.system(),
+            platform_info.os_name,
             memory=self._memory,
             repo_map=map_text,
             skill_catalog=self._skills.catalog(),
+            shell_family=platform_info.shell_family(),
         )
 
     def _show_understanding_status(self) -> None:
@@ -246,6 +286,8 @@ class Repl:
             self._renderer.status(
                 f"web search: on ({self._config.web_search.provider})"
             )
+        if self._semantic_index is not None and not self._config.semantic_search.auto_index:
+            self._renderer.status("semantic search: on (use /index to build)")
         if self._mcp_tool_count > 0:
             self._renderer.status(f"mcp: {self._mcp_tool_count} tool(s)")
 
@@ -319,6 +361,8 @@ class Repl:
             self._cmd_memory(argument)
         elif command == "/skills":
             self._cmd_skills()
+        elif command == "/index":
+            self._cmd_index()
         elif command == "/undo":
             self._cmd_undo()
         elif command == "/tools":
@@ -421,16 +465,20 @@ class Repl:
         )
 
     def _cmd_memory(self, argument: str) -> None:
-        if argument and argument.lower() != "reload":
-            self._renderer.warning("Usage: /memory or /memory reload.")
-            return
-        if not self._config.memory.enabled:
-            self._renderer.info("Project memory is disabled (memory.enabled = false).")
-            return
-        if argument:
+        arg = argument.strip()
+        if arg.lower() == "reload":
+            if not self._config.memory.enabled:
+                self._renderer.info(
+                    "Project memory is disabled (memory.enabled = false)."
+                )
+                return
             self._memory = self._load_memory()
             self._rebuild_prompt_dependents()
             self._renderer.info("Reloaded project memory from disk.")
+            arg = ""
+        if not self._config.memory.enabled:
+            self._renderer.info("Project memory is disabled (memory.enabled = false).")
+            return
         if self._memory is None:
             names = ", ".join(self._config.memory.files)
             self._renderer.info(
@@ -438,7 +486,24 @@ class Repl:
                 "one to give the agent durable project context."
             )
             return
+        # /memory <section name> shows just that section.
+        if arg:
+            section = self._memory.find_section(arg)
+            if section is None:
+                titles = ", ".join(self._memory.section_titles()) or "(none)"
+                self._renderer.warning(
+                    f"No memory section matching '{arg}'. Sections: {titles}."
+                )
+                return
+            self._renderer.status(f"memory section: {section.title}")
+            self._renderer.plain(section.body or "(empty section)")
+            return
+        # Plain /memory shows the file path, a section outline, then the text.
         self._renderer.status(f"memory file: {self._memory.path}")
+        titles = self._memory.section_titles()
+        if len(titles) > 1:
+            outline = ", ".join(titles)
+            self._renderer.status(f"sections: {outline}")
         self._renderer.plain(self._memory.text)
 
     def _cmd_tools(self) -> None:
@@ -458,6 +523,28 @@ class Repl:
         for name in self._skills.names():
             skill = self._skills.get(name)
             self._renderer.plain(f"  {name}: {skill.description}")
+
+    def _cmd_index(self) -> None:
+        if self._semantic_index is None:
+            if not self._config.semantic_search.enabled:
+                self._renderer.info(
+                    "Semantic search is disabled (set semantic_search.enabled = "
+                    "true in config)."
+                )
+            else:
+                self._renderer.info(
+                    "Semantic search is enabled but unavailable; install the "
+                    "'semantic' extra."
+                )
+            return
+        self._renderer.info("Rebuilding the semantic index...")
+        status = self._semantic_index.build()
+        if status.ok:
+            self._renderer.info(
+                f"Indexed {status.chunk_count} chunks from {status.file_count} files."
+            )
+        else:
+            self._renderer.error(f"Could not build the index: {status.reason}.")
 
 
 def run_repl(config: AppConfig) -> None:

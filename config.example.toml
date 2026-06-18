@@ -1,0 +1,157 @@
+# Example termcoder configuration.
+#
+# Copy this file to ".termcoder/config.toml" inside your workspace and edit it.
+# Every key is optional. Anything omitted uses a built-in default, and the
+# default active model is local Ollama, so the tool works with no cloud key.
+
+# Which model to use by default. Must match a key under [models] or one of the
+# built-in models: "ollama", "openai", "anthropic".
+active_model = "ollama"
+
+# Stream the model output token by token. Set to false for a single response.
+stream = true
+
+# Safety cap on how many tool steps the agent may take within one user turn.
+max_tool_iterations = 25
+
+# Set to false to remove the run_command tool entirely, so the agent can never
+# run host shell commands.
+allow_run_command = true
+
+# Set to false to disable file snapshots and the /undo command. When enabled,
+# the file changes from each turn can be reverted with /undo.
+enable_undo = true
+
+# Show a dim one-line token and cost readout after each turn. Session totals
+# are always available with /usage.
+show_usage = true
+
+# Sandbox for the run_command tool. With backend "auto", termcoder runs commands
+# in a rootless Podman container when available, falls back to Docker, and only
+# then to running on the host. Use "podman" or "docker" to require a specific
+# engine, or "host" to always run on the host with no isolation.
+#
+# The container image must be available locally, or network must be enabled for
+# the engine to pull it on first use. Network inside the command is off by
+# default; set network = true to allow commands to reach the network (for
+# example to install packages).
+# Set read_only = true to also mount the container root filesystem read-only
+# (with a writable /tmp). Hardens runs that only need to touch the workspace;
+# leave false if commands install packages inside the container.
+[sandbox]
+backend = "auto"
+image = "python:3.14-slim"
+network = false
+memory = "1g"
+cpus = 2.0
+pids_limit = 256
+read_only = false
+
+# Conversation compaction. When the estimated context size passes
+# compact_threshold of the model's context window, older turns are summarized
+# and the most recent keep_recent_turns are kept verbatim. The full transcript
+# on disk is never altered. You can also compact at any time with /compact.
+# summary_model optionally names a model from [models] to write compaction
+# summaries. The summary request is the largest single prompt termcoder sends,
+# so a small, cheap model here saves real money on cloud providers.
+[context]
+auto_compact = true
+compact_threshold = 0.8
+keep_recent_turns = 3
+# summary_model = "ollama"
+
+# Repository map. A token-budgeted overview of the workspace's most important
+# symbols, injected into the system prompt as a stable block. tokens is the
+# budget the map is fitted into; raise it for large repositories or set
+# enabled = false to turn the map off. Rebuild during a session with
+# /map refresh.
+[repomap]
+enabled = true
+tokens = 1024
+
+# Project memory. The first existing file from this list is loaded into the
+# system prompt as durable project context. Keep it short; it is truncated
+# beyond 16k characters. Reload during a session with /memory reload.
+[memory]
+enabled = true
+files = ["TERMCODER.md", "AGENTS.md"]
+
+# Web search. Off by default because it reaches the network. When enabled, the
+# default provider is SearXNG, a self-hostable meta-search engine, so a local
+# instance keeps queries private. Point api_base at your SearXNG URL (or set
+# the SEARXNG_API_BASE environment variable). Other LiteLLM search providers
+# such as "tavily", "exa" or "perplexity" can be used instead; those read
+# their own API keys from the environment.
+[web_search]
+enabled = false
+provider = "searxng"
+api_base = ""
+
+# Skills. Agent-Skills-style SKILL.md folders discovered under each directory
+# below, relative to the workspace. Only each skill's name and description load
+# at startup; the agent loads a skill's full instructions on demand with the
+# read_skill tool. List loaded skills with /skills.
+[skills]
+enabled = true
+directories = [".termcoder/skills"]
+
+# Semantic code search (optional, off by default). When enabled, the workspace
+# is chunked and embedded into a local LanceDB index, and a semantic_search
+# tool lets the agent find code by meaning. Requires the 'semantic' extra
+# (pip install -e ".[semantic]") and an embedding model. The default model is
+# a local Ollama model, so code never leaves your machine; pull it first with
+# 'ollama pull nomic-embed-text'. Agentic grep (search_text) stays the primary
+# tool; this helps on large codebases. Rebuild the index any time with /index.
+[semantic_search]
+enabled = false
+model = "ollama/nomic-embed-text"
+# api_base = "http://localhost:11434"   # only if Ollama is not on the default
+max_results = 5
+auto_index = true
+
+# MCP servers. Each entry connects termcoder to a Model Context Protocol server
+# running as a local subprocess (stdio transport), whose tools become available
+# to the agent behind the approval gate. Only add servers you trust: their
+# tools are model-controlled. This is an array of tables, so repeat the
+# [[mcp_servers]] header for each server.
+#
+# [[mcp_servers]]
+# name = "git"
+# command = "uvx"
+# args = ["mcp-server-git", "--repository", "."]
+# enabled = true
+#
+# [[mcp_servers]]
+# name = "fetch"
+# command = "uvx"
+# args = ["mcp-server-fetch"]
+
+# Define or override models below. Each model is a LiteLLM model string plus
+# optional connection settings. API keys are never written here; instead name
+# the environment variable that holds the key.
+#
+# For Anthropic models, termcoder adds prompt-cache breakpoints automatically
+# so the stable prefix is billed at the cached rate. Set cache_prompts = false
+# on a model to turn that off (for example for very slow-paced sessions, where
+# the 5-minute cache expires between turns and writes cost extra).
+
+[models.ollama]
+model = "ollama_chat/llama3.1"
+api_base = "http://localhost:11434"
+context_window = 8192
+
+[models.openai]
+model = "gpt-4o"
+api_key_env = "OPENAI_API_KEY"
+context_window = 128000
+
+[models.anthropic]
+model = "claude-3-5-sonnet-20241022"
+api_key_env = "ANTHROPIC_API_KEY"
+context_window = 200000
+
+# Example of adding another local model:
+# [models.qwen]
+# model = "ollama_chat/qwen2.5-coder"
+# api_base = "http://localhost:11434"
+# context_window = 32768
