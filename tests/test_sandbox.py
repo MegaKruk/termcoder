@@ -8,6 +8,7 @@ host runner is exercised directly with a harmless echo.
 from __future__ import annotations
 
 import shutil
+import sys
 import time
 
 import pytest
@@ -112,8 +113,11 @@ def test_build_runner_explicit_missing_raises(tmp_path, monkeypatch):
 
 def test_host_runner_timeout_kills_process_group(tmp_path):
     runner = HostCommandRunner(tmp_path)
+    # Use Python for a portable sleep: the shell builtin 'sleep' does not exist
+    # on Windows, so this exercises the timeout-kill path on every platform.
+    sleep_command = f'"{sys.executable}" -c "import time; time.sleep(30)"'
     started = time.monotonic()
-    result = runner.run("sleep 30", timeout=1)
+    result = runner.run(sleep_command, timeout=1)
     elapsed = time.monotonic() - started
 
     assert result.timed_out

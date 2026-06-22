@@ -60,6 +60,10 @@ class FindFilesTool(ReadOnlyTool):
             dirs[:] = sorted(d for d in dirs if d not in IGNORED_DIRS)
             for name in names:
                 rel = context.workspace.relative(Path(current) / name)
+                # Use forward slashes everywhere so glob patterns that contain
+                # '/' (for example 'tests/test_*.py') match on Windows too, and
+                # the returned paths are consistent across platforms.
+                rel = rel.replace("\\", "/")
                 if fnmatch(rel, args.pattern) or fnmatch(name, args.pattern):
                     matches.append(rel)
         matches.sort()

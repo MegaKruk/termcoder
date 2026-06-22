@@ -43,6 +43,29 @@ def _process_creation_kwargs() -> dict:
     return {"creationflags": creationflags}
 
 
+def _kill_tree_windows(process: subprocess.Popen) -> None:
+    """Terminate a process and all its children on Windows.
+
+    With ``shell=True`` the immediate child is cmd.exe and the real work runs
+    in grandchildren, so killing only the child leaves them running and holding
+    the output pipes open. ``taskkill /T`` terminates the whole tree by PID;
+    if it is somehow unavailable, fall back to killing the direct child.
+    """
+    try:
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=_HOST_TIMEOUT_SLACK_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        try:
+            process.kill()
+        except OSError:
+            pass
+
+
 
 @dataclass
 class CommandResult:
@@ -139,15 +162,13 @@ class HostCommandRunner:
 
     @staticmethod
     def _kill_tree(process: subprocess.Popen) -> None:
-        try:
-            if os.name == "posix":
+        if os.name == "posix":
+            try:
                 os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-            else:
-                # Windows: terminate the child; CREATE_NEW_PROCESS_GROUP limits
-                # stray children but there is no portable group kill.
+            except (ProcessLookupError, PermissionError, OSError):
                 process.kill()
-        except (ProcessLookupError, PermissionError, OSError):
-            process.kill()
+        else:
+            _kill_tree_windows(process)
         try:
             process.communicate(timeout=_HOST_TIMEOUT_SLACK_SECONDS)
         except (subprocess.TimeoutExpired, ValueError):
