@@ -113,9 +113,13 @@ def test_build_runner_explicit_missing_raises(tmp_path, monkeypatch):
 
 def test_host_runner_timeout_kills_process_group(tmp_path):
     runner = HostCommandRunner(tmp_path)
-    # Use Python for a portable sleep: the shell builtin 'sleep' does not exist
-    # on Windows, so this exercises the timeout-kill path on every platform.
-    sleep_command = f'"{sys.executable}" -c "import time; time.sleep(30)"'
+    # Write the sleep as a script file and run it, so the command has no nested
+    # quotes to parse. Inline 'python -c "..."' is quoted differently by sh,
+    # cmd.exe and PowerShell; a bare 'python script.py' parses the same in all
+    # of them, so this exercises the timeout-kill path portably.
+    script = tmp_path / "_sleep.py"
+    script.write_text("import time\ntime.sleep(30)\n", encoding="utf-8")
+    sleep_command = f'"{sys.executable}" "{script}"'
     started = time.monotonic()
     result = runner.run(sleep_command, timeout=1)
     elapsed = time.monotonic() - started
@@ -141,3 +145,44 @@ def test_container_argv_default_is_writable_rootfs(tmp_path):
     runner = ContainerCommandRunner("podman", SandboxSettings(), tmp_path)
     argv = runner._build_argv("ls", "name")
     assert "--read-only" not in argv
+
+
+def test_popen_invocation_posix_uses_shell(monkeypatch):
+    from termcoder.sandbox import runner
+
+    monkeypatch.setattr(runner.os, "name", "posix")
+    args, use_shell = runner._popen_invocation("ls -la")
+    assert args == "ls -la"
+    assert use_shell is True
+
+
+def test_popen_invocation_windows_powershell_wraps_command(monkeypatch):
+    from termcoder.sandbox import runner
+
+    monkeypatch.setattr(runner.os, "name", "nt")
+    monkeypatch.setenv("PSModulePath", "C:\\dummy")
+    monkeypatch.setattr(
+        runner.shutil, "which", lambda n: "powershell" if n == "powershell" else None
+    )
+    # A bare command runs as-is through powershell.
+    args, use_shell = runner._popen_invocation("Get-ChildItem")
+    assert use_shell is False
+    assert args[0] == "powershell"
+    assert "-Command" in args
+    assert args[-1] == "Get-ChildItem"
+    # A command starting with a quoted path gets the call operator so it runs.
+    args, _ = runner._popen_invocation('"C:\\tools\\python.exe" script.py')
+    assert args[-1].startswith("& ")
+    # A PowerShell language construct is left untouched (no call operator).
+    args, _ = runner._popen_invocation("$env:FOO = 'bar'")
+    assert args[-1] == "$env:FOO = 'bar'"
+
+
+def test_popen_invocation_windows_cmd_falls_back_to_shell(monkeypatch):
+    from termcoder.sandbox import runner
+
+    monkeypatch.setattr(runner.os, "name", "nt")
+    monkeypatch.delenv("PSModulePath", raising=False)
+    args, use_shell = runner._popen_invocation("dir")
+    assert args == "dir"
+    assert use_shell is True

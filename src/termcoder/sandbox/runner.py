@@ -66,6 +66,38 @@ def _kill_tree_windows(process: subprocess.Popen) -> None:
             pass
 
 
+def _host_uses_powershell() -> bool:
+    """True when the host shell is PowerShell (Windows).
+
+    Detected via PSModulePath, the same signal platform_info uses, so the
+    runner executes commands in the same shell the model was told to target.
+    """
+    return os.name == "nt" and bool(os.environ.get("PSModulePath"))
+
+
+def _popen_invocation(command: str) -> tuple[object, bool]:
+    """Return the (args, shell) pair to launch a shell command with.
+
+    On Windows under PowerShell, the default shell=True would run the command
+    through cmd.exe, which does not understand PowerShell cmdlets such as
+    Get-ChildItem. So PowerShell commands are run explicitly through
+    powershell.exe. Everywhere else, shell=True uses the platform's default
+    shell (cmd.exe on plain Windows, the login shell on POSIX).
+    """
+    if _host_uses_powershell():
+        executable = shutil.which("pwsh") or shutil.which("powershell") or "powershell"
+        # PowerShell parses a command that starts with a quoted string as a
+        # string literal, not an invocation, so a quoted executable path (for
+        # example "C:\Program Files\tool.exe" --flag) would not run. Prefix
+        # just that case with the call operator '&'. Bare commands and
+        # PowerShell language constructs (such as $env:X = 'y') are left alone.
+        prepared = command
+        if command.lstrip()[:1] in "\"'":
+            prepared = f"& {command}"
+        return [executable, "-NoProfile", "-Command", prepared], False
+    return command, True
+
+
 
 @dataclass
 class CommandResult:
@@ -133,9 +165,10 @@ class HostCommandRunner:
         library offers without extra dependencies.
         """
         creation = _process_creation_kwargs()
+        args, use_shell = _popen_invocation(command)
         process = subprocess.Popen(
-            command,
-            shell=True,
+            args,
+            shell=use_shell,
             cwd=str(self._root),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
