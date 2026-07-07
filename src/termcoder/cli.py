@@ -6,6 +6,7 @@ directory. Subcommands cover listing models and sessions.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import typer
@@ -26,6 +27,11 @@ _WORKSPACE_OPTION = typer.Option(
 _MODEL_OPTION = typer.Option(
     None, "--model", "-m", help="Model name from the registry to use."
 )
+_REMOTE_OPTION = typer.Option(
+    None,
+    "--remote/--no-remote",
+    help="Start the LAN remote control server for this session.",
+)
 
 
 def _workspace(path: Path | None) -> Path:
@@ -36,13 +42,14 @@ def _workspace(path: Path | None) -> Path:
 def main(ctx: typer.Context) -> None:
     """Start interactive chat when no subcommand is given."""
     if ctx.invoked_subcommand is None:
-        chat(workspace=None, model=None)
+        chat(workspace=None, model=None, remote=None)
 
 
 @app.command()
 def chat(
     workspace: Path | None = _WORKSPACE_OPTION,
     model: str | None = _MODEL_OPTION,
+    remote: bool | None = _REMOTE_OPTION,
 ) -> None:
     """Start an interactive coding session."""
     from .config_env import load_env_file
@@ -58,6 +65,8 @@ def chat(
     except TermcoderError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1)
+    if remote is not None:
+        config = replace(config, remote=replace(config.remote, enabled=remote))
     run_repl(config)
 
 

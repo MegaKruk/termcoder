@@ -23,6 +23,14 @@ from ..memory.loader import ProjectMemory, load_project_memory
 from ..platform_info import detect_platform
 from ..providers.llm_client import LLMClient
 from ..providers.usage import UsageTracker
+from ..remote import (
+    EventBus,
+    SessionStateEvent,
+    ThinkingVisibilityEvent,
+    TurnEndedEvent,
+    UserMessageEvent,
+    remote_available,
+)
 from ..repomap.builder import RepoMapBuilder, RepoMapResult
 from ..sandbox.runner import build_command_runner
 from ..semantic import SemanticIndex, lancedb_available
@@ -33,6 +41,8 @@ from ..tools import build_default_registry
 from ..tools.base import ToolContext
 from ..workspace.paths import WorkspaceGuard
 from .approver import ConsoleApprover
+from .broadcast import BroadcastingRenderer
+from .interruptible import CancelToken, PromptInterrupted, prompt_interruptible
 from .renderer import Renderer
 
 _HELP = """Commands:
@@ -40,14 +50,16 @@ _HELP = """Commands:
   /new                 Start a new chat session.
   /sessions            List chat sessions for this workspace.
   /resume <id>         Resume a previous session by id.
-  /model [name]              Show the active model, or switch to another configured one.
-  /compact [focus]            Summarize older turns now to free context space.
+  /model [name]        Show the active model, or switch to another configured one.
+  /compact [focus]     Summarize older turns now to free context space.
   /usage               Show token and cost usage for this session.
-  /map [refresh]                Show the repository map, or rebuild it from the files.
-  /memory [reload]             Show the project memory file, or reload it from disk.
+  /map [refresh]       Show the repository map, or rebuild it from the files.
+  /memory [reload]     Show the project memory file, or reload it from disk.
   /skills              List the loaded skills.
   /index               Rebuild the semantic search index (when enabled).
   /undo                Revert the file changes from the most recent turn.
+  /thinking            Toggle live display of the model's reasoning tokens.
+  /remote              Show the remote control status and phone URL.
   /tools               List the available tools.
   /clear               Clear the screen.
   /exit, /quit         Leave termcoder.
@@ -61,9 +73,17 @@ class Repl:
         self._config = config
         config.config_dir.mkdir(parents=True, exist_ok=True)
 
-        self._renderer = Renderer()
+        self._bus = EventBus()
+        self._show_thinking = config.show_thinking
+        self._busy = False
+        self._remote_server = None
+        self._renderer = BroadcastingRenderer(
+            self._bus, thinking_visible=lambda: self._show_thinking
+        )
         self._prompt = PromptSession(history=FileHistory(str(config.history_path)))
-        self._approver = ConsoleApprover(self._renderer)
+        self._approver = ConsoleApprover(
+            self._renderer, prompt_session=self._prompt, bus=self._bus
+        )
         self._store = SessionStore(config.sessions_dir)
         self._workspace = WorkspaceGuard(config.workspace)
         self._runner = build_command_runner(config.sandbox, config.workspace)
@@ -103,6 +123,7 @@ class Repl:
         )
         self._maybe_auto_index()
         self._show_understanding_status()
+        self._start_remote()
         try:
             self._loop()
         finally:
@@ -125,29 +146,71 @@ class Repl:
 
     def _loop(self) -> None:
         while True:
-            try:
-                line = self._prompt.prompt("you> ")
-            except EOFError:
+            source, line = self._next_input()
+            if line is None:
                 break
-            except KeyboardInterrupt:
-                continue
             line = line.strip()
             if not line:
                 continue
+            self._bus.publish(UserMessageEvent(text=line, source=source))
+            if source == "remote":
+                self._echo_remote_input(line)
+            done = False
             if line.startswith("/"):
-                if self._handle_command(line):
-                    break
+                done = self._handle_command(line)
+            else:
+                self._run_turn(line)
+            self._bus.publish(TurnEndedEvent())
+            if done:
+                break
+
+    def _next_input(self) -> tuple[str, str | None]:
+        """Wait for the next message from the terminal or a remote client.
+
+        Remote input queued while the terminal prompt is open dismisses that
+        prompt so the message is handled immediately. Returns the input source
+        and the line, or None as the line when the terminal signals EOF.
+        """
+        while True:
+            queued = self._bus.poll_input()
+            if queued is not None:
+                return ("remote", queued.text)
+            cancel = CancelToken()
+            remove = self._bus.add_input_listener(cancel.trip)
+            try:
+                line = prompt_interruptible(self._prompt, "you> ", cancel)
+            except PromptInterrupted:
                 continue
-            self._run_turn(line)
+            except EOFError:
+                return ("terminal", None)
+            except KeyboardInterrupt:
+                continue
+            finally:
+                remove()
+            return ("terminal", line)
+
+    def _echo_remote_input(self, line: str) -> None:
+        """Show a remotely sent message on the terminal.
+
+        Printed directly so it is not broadcast a second time; remote clients
+        already learn about the message from its user_message event.
+        """
+        self._renderer.console.print(
+            f"you (phone)> {line}", style="cyan", markup=False, highlight=False
+        )
 
     def _close(self) -> None:
         """Release resources held for the session, such as MCP servers."""
+        if self._remote_server is not None:
+            self._remote_server.stop()
+            self._remote_server = None
         if self._mcp_client is not None:
             self._mcp_client.close()
             self._mcp_client = None
 
     def _run_turn(self, line: str) -> None:
         self._usage.begin_turn()
+        self._busy = True
         try:
             self._agent.run_turn(line)
         except ProviderError as exc:
@@ -161,6 +224,7 @@ class Repl:
         except KeyboardInterrupt:
             self._renderer.warning("Interrupted this turn.")
         finally:
+            self._busy = False
             if self._config.show_usage and self._usage.turn.calls:
                 self._renderer.usage(self._usage.turn, self._usage.session)
 
@@ -168,6 +232,74 @@ class Repl:
         if self._runner.is_sandboxed:
             return f"{self._runner.backend} container"
         return "host (no sandbox)"
+
+    # Remote control (Phase 6)
+
+    def _start_remote(self) -> None:
+        """Start the LAN remote server when configured, degrading gracefully."""
+        if not self._config.remote.enabled:
+            return
+        if not remote_available():
+            self._renderer.warning(
+                "remote: enabled but the server dependencies are missing. "
+                'Install them with: pip install -e ".[remote]"'
+            )
+            return
+        from ..remote.server import RemoteServer, generate_token
+
+        settings = self._config.remote
+        token = settings.token or generate_token()
+        server = RemoteServer(
+            self._bus,
+            host=settings.host,
+            port=settings.port,
+            token=token,
+            session_state=self._session_state_event,
+            set_thinking=self._set_thinking,
+            notify=self._renderer.status,
+        )
+        if server.start():
+            self._remote_server = server
+            self._renderer.status(f"remote: listening on {server.url}")
+            self._renderer.status(
+                "remote: open this address on a phone on the same network"
+            )
+        else:
+            self._renderer.warning(f"remote: failed to start ({server.error})")
+
+    def _session_state_event(self) -> SessionStateEvent:
+        """Snapshot the session for a newly connected remote client."""
+        return SessionStateEvent(
+            workspace=str(self._config.workspace),
+            model=self._llm.model_name,
+            busy=self._busy,
+            show_thinking=self._show_thinking,
+        )
+
+    def _set_thinking(self, enabled: bool) -> None:
+        """Switch the shared reasoning display on or off, telling everyone.
+
+        Called from the /thinking command on the main thread and from remote
+        clients on the server thread; both paths are safe because the bus and
+        the console are thread-safe and the flag is a simple boolean.
+        """
+        self._show_thinking = bool(enabled)
+        self._bus.publish(ThinkingVisibilityEvent(enabled=self._show_thinking))
+        state = "on" if self._show_thinking else "off"
+        self._renderer.status(f"thinking display: {state}")
+
+    def _cmd_remote(self) -> None:
+        """Report the remote server status and the address to open."""
+        if self._remote_server is not None:
+            self._renderer.info(f"Remote control is on: {self._remote_server.url}")
+            return
+        if self._config.remote.enabled:
+            self._renderer.info("Remote control failed to start for this session.")
+            return
+        self._renderer.info(
+            "Remote control is off. Start with --remote, or set enabled = true "
+            "in the remote section of .termcoder/config.toml."
+        )
 
     def _build_client(self) -> LLMClient:
         return LLMClient(
@@ -365,6 +497,10 @@ class Repl:
             self._cmd_index()
         elif command == "/undo":
             self._cmd_undo()
+        elif command == "/thinking":
+            self._set_thinking(not self._show_thinking)
+        elif command == "/remote":
+            self._cmd_remote()
         elif command == "/tools":
             self._cmd_tools()
         elif command == "/clear":

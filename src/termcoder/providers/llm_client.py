@@ -28,6 +28,7 @@ from typing import Any
 from ..config import ModelConfig
 from ..context.tokens import TokenCounter
 from ..errors import MalformedModelOutputError, ProviderError
+from ..llm.thinking import ThinkingFilter, strip_thinking
 from .usage import UsageTracker
 
 _CACHE_CONTROL = {"type": "ephemeral"}
@@ -47,6 +48,38 @@ def _chunk_text(chunk: Any) -> str | None:
     except (AttributeError, IndexError):
         return None
     return getattr(delta, "content", None)
+
+
+def _chunk_thinking(chunk: Any) -> str | None:
+    """Return a chunk's reasoning fragment when the provider sends one.
+
+    Providers that expose reasoning as a first-class field surface it here as
+    ``reasoning_content`` on the delta. Models that inline ``<think>`` tags in
+    the normal content instead are handled separately by a ThinkingFilter.
+    """
+    try:
+        delta = chunk.choices[0].delta
+    except (AttributeError, IndexError):
+        return None
+    return getattr(delta, "reasoning_content", None)
+
+
+def _strip_message_thinking(message: Any) -> None:
+    """Remove inline think tags from an assembled message before storage.
+
+    Only the visible answer is persisted and replayed to the model on later
+    turns; stored reasoning would just inflate the context. Providers that use
+    a dedicated reasoning field already keep it out of ``content``, so this
+    only has work to do for models that inline ``<think>`` tags.
+    """
+    content = getattr(message, "content", None)
+    if not isinstance(content, str) or "<think>" not in content:
+        return
+    try:
+        message.content = strip_thinking(content)
+    except Exception:
+        # A read-only message shape; leave the content as delivered.
+        pass
 
 
 def _is_malformed_output(exc: Exception) -> bool:
@@ -89,15 +122,23 @@ class LLMClient:
         messages: list[dict],
         tools: list[dict] | None = None,
         on_text: Callable[[str], None] | None = None,
+        on_thinking: Callable[[str], None] | None = None,
     ) -> CompletionResult:
-        """Run a completion, streaming text through ``on_text`` when enabled."""
+        """Run a completion, streaming output through callbacks when enabled.
+
+        Visible tokens are delivered to ``on_text`` and any reasoning tokens to
+        ``on_thinking``. Reasoning is stripped from the stored message so it is
+        never persisted or replayed.
+        """
         kwargs = self._config.to_completion_kwargs()
         if tools:
             kwargs["tools"] = tools
         prepared = self._prepare_messages(messages)
         try:
             if self._stream:
-                result = self._complete_streaming(prepared, kwargs, on_text)
+                result = self._complete_streaming(
+                    prepared, kwargs, on_text, on_thinking
+                )
             else:
                 result = self._complete_blocking(prepared, kwargs)
         except ProviderError:
@@ -153,22 +194,62 @@ class LLMClient:
         messages: list[dict],
         kwargs: dict,
         on_text: Callable[[str], None] | None,
+        on_thinking: Callable[[str], None] | None = None,
     ) -> CompletionResult:
         import litellm
 
         chunks: list[Any] = []
+        thinking_filter = ThinkingFilter()
         stream = litellm.completion(messages=messages, stream=True, **kwargs)
         for chunk in stream:
             chunks.append(chunk)
-            text = _chunk_text(chunk)
-            if text and on_text is not None:
-                on_text(text)
+            self._route_chunk(chunk, thinking_filter, on_text, on_thinking)
+        self._flush_thinking(thinking_filter, on_text, on_thinking)
         if not chunks:
             raise ProviderError("The model returned an empty response.")
         assembled = litellm.stream_chunk_builder(chunks, messages=messages)
         if assembled is None:
             raise ProviderError("Could not assemble the streamed response.")
-        return CompletionResult(assembled.choices[0].message, assembled)
+        message = assembled.choices[0].message
+        _strip_message_thinking(message)
+        return CompletionResult(message, assembled)
+
+    @staticmethod
+    def _route_chunk(
+        chunk: Any,
+        thinking_filter: ThinkingFilter,
+        on_text: Callable[[str], None] | None,
+        on_thinking: Callable[[str], None] | None,
+    ) -> None:
+        """Send one chunk's visible and reasoning parts to their callbacks.
+
+        Reasoning arrives either as a dedicated field or as inline think tags;
+        both are handled and merged into a single reasoning channel.
+        """
+        reasoning = _chunk_thinking(chunk)
+        if reasoning and on_thinking is not None:
+            on_thinking(reasoning)
+        text = _chunk_text(chunk)
+        if not text:
+            return
+        visible, thinking = thinking_filter.feed(text)
+        if visible and on_text is not None:
+            on_text(visible)
+        if thinking and on_thinking is not None:
+            on_thinking(thinking)
+
+    @staticmethod
+    def _flush_thinking(
+        thinking_filter: ThinkingFilter,
+        on_text: Callable[[str], None] | None,
+        on_thinking: Callable[[str], None] | None,
+    ) -> None:
+        """Release any text the filter buffered while watching for a tag."""
+        visible, thinking = thinking_filter.flush()
+        if visible and on_text is not None:
+            on_text(visible)
+        if thinking and on_thinking is not None:
+            on_thinking(thinking)
 
     def _complete_blocking(
         self, messages: list[dict], kwargs: dict
@@ -176,7 +257,9 @@ class LLMClient:
         import litellm
 
         response = litellm.completion(messages=messages, stream=False, **kwargs)
-        return CompletionResult(response.choices[0].message, response)
+        message = response.choices[0].message
+        _strip_message_thinking(message)
+        return CompletionResult(message, response)
 
     def _record_usage(self, messages: list[dict], result: CompletionResult) -> None:
         """Record this call's usage, estimating anything the provider omitted."""

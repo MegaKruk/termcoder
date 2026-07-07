@@ -26,6 +26,13 @@ enable_undo = true
 # are always available with /usage.
 show_usage = true
 
+# Show the model's reasoning tokens live as it thinks. Off by default so the
+# terminal stays clean. Toggle at any time during a session with /thinking.
+# Useful with slow local reasoning models, where seeing the reasoning stream
+# confirms the model is working rather than stuck. The setting is shared with
+# any connected remote clients.
+show_thinking = false
+
 # Sandbox for the run_command tool. With backend "auto", termcoder runs commands
 # in a rootless Podman container when available, falls back to Docker, and only
 # then to running on the host. Use "podman" or "docker" to require a specific
@@ -109,6 +116,27 @@ model = "ollama/nomic-embed-text"
 max_results = 5
 auto_index = true
 
+# LAN remote control. When enabled, termcoder starts a small local web server
+# so a phone (or any browser) on the same network can attach to this session:
+# watch output stream live, send messages, and answer approval prompts. The
+# terminal remains the source of truth; the phone is a thin remote. Requires
+# the optional server dependencies: pip install -e ".[remote]". You can also
+# enable this for a single run with the --remote flag.
+#
+# Security note: this is meant for a trusted home or office network. Anyone who
+# can reach the address and has the token can drive the agent, including
+# approving file writes and commands. The token is the real gate.
+[remote]
+enabled = false
+# Interface to bind. "0.0.0.0" listens on all interfaces so other devices on
+# the network can connect; use "127.0.0.1" to keep it to this machine only.
+host = "0.0.0.0"
+port = 8642
+# Access token appended to the phone URL. Leave empty to generate a fresh
+# random token each session (recommended). Set a fixed value only if you want
+# the URL to stay the same across sessions, accepting the reuse of a secret.
+token = ""
+
 # MCP servers. Each entry connects termcoder to a Model Context Protocol server
 # running as a local subprocess (stdio transport), whose tools become available
 # to the agent behind the approval gate. Only add servers you trust: their
@@ -144,11 +172,13 @@ context_window = 8192
 model = "gpt-4o"
 api_key_env = "OPENAI_API_KEY"
 context_window = 128000
+reasoning_effort = "medium"
 
 [models.anthropic]
 model = "claude-3-5-sonnet-20241022"
 api_key_env = "ANTHROPIC_API_KEY"
 context_window = 200000
+reasoning_effort = "medium"
 
 # Example of adding another local model:
 # [models.qwen]

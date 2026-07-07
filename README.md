@@ -85,6 +85,14 @@ Extensibility:
   default, so code never leaves your machine. Agentic grep stays the primary
   tool; this helps on large codebases. Off by default; enable under
   semantic_search and rebuild the index with /index.
+- Remote control over the LAN (optional). When enabled, termcoder starts a
+  small local web server so a phone on the same network can attach to the
+  session: watch output and tool activity stream live, send messages, and
+  answer approval prompts from the phone. The terminal stays the source of
+  truth; the phone is a thin remote and both drive one shared session. Reasoning
+  display is a shared toggle, so /thinking or the phone checkbox streams the
+  model's thinking to both at once. Off by default; enable with --remote or
+  under remote, and install the extra with pip install -e ".[remote]".
 
 Memory and structure:
 
@@ -242,6 +250,8 @@ See `.env.example` for the format.
 /skills          List the loaded skills.
 /index           Rebuild the semantic search index (when enabled).
 /undo            Revert the file changes from the most recent turn.
+/thinking        Toggle live display of the model's reasoning tokens.
+/remote          Show the remote control status and phone URL.
 /tools           List the available tools.
 /clear           Clear the screen.
 /exit, /quit     Leave termcoder.
@@ -352,6 +362,72 @@ name is wrong or unavailable, not termcoder; check the server's current name on
 PyPI or npm. Only configure servers from sources you trust: MCP tools are
 model-controlled and are an external supply-chain surface.
 
+## Remote control over the LAN
+
+Remote control is optional and off by default. When enabled, termcoder starts a
+small web server so a phone (or any browser) on the same network can attach to
+the running session. You keep working in the terminal; the phone mirrors the
+same session and can also send messages and answer approvals. This is handy for
+kicking off or steering a task from the couch while a slow local model works, or
+approving a file write without walking back to the keyboard.
+
+Install the extra:
+
+```
+pip install -e ".[remote]"
+```
+
+If you installed termcoder with pipx, include the extra when you install from
+the source repository directory, for example:
+
+```
+pipx install -e ".[semantic,remote]" --force
+```
+
+Enable it for a single run with the flag:
+
+```
+termcoder --remote
+```
+
+Or turn it on in `.termcoder/config.toml`:
+
+```
+[remote]
+enabled = true
+host = "0.0.0.0"
+port = 8642
+token = ""
+```
+
+On start, termcoder prints a line such as
+`remote: listening on http://192.168.1.20:8642/?token=abcd1234`. Open that
+address in your phone's browser while it is on the same WiFi. The page shows the
+session live: streamed replies, tool activity, and status lines. Type in the box
+to send a message, exactly as if you had typed it in the terminal; your terminal
+shows it as `you (phone)>`. When the agent asks to write a file or run a command,
+the approval appears as a card on the phone with approve, allow-for-session, and
+reject buttons (with an optional feedback field). The terminal and phone race to
+answer: whoever responds first wins, the other side updates to show how it was
+resolved, and a terminal answer still gets its usual feedback prompt on reject.
+
+Reasoning display is a shared toggle. Use `/thinking` in the terminal or the
+"thinking" checkbox on the phone, and the model's reasoning tokens stream in a
+dim block on both at once (off by default so the view stays clean). If the phone
+screen sleeps or the network drops, the page reconnects on its own and the
+server replays the recent backlog so the view catches up.
+
+Use `/remote` at any time to reprint the address, and see the remote status.
+
+Security note: this is meant for a trusted home or office network. The URL
+carries a token that is required to connect, and the server also checks that a
+browser's Origin matches its Host to close off drive-by connections. That token
+is the real gate: anyone who can reach the address and has the token can drive
+the agent, including approving writes and commands. Leaving `token` empty
+generates a fresh random token each session; set a fixed token only if you want
+a stable URL and accept reusing the secret. Bind to `127.0.0.1` if you want the
+server reachable only from the same machine.
+
 ## Test
 
 ```
@@ -387,14 +463,16 @@ src/termcoder/
   mcp/             MCP client and adapters that wrap server tools as tools.
   web/             Web search tool over LiteLLM's unified search API.
   semantic/        Optional LanceDB semantic code search (chunker, index, tool).
+  remote/          Optional LAN remote: event bus, events, server, phone page.
   platform_info.py OS and shell detection for prompts and command execution.
   config_env.py    Loads a workspace .env file into the environment.
   snapshots/       File snapshots and undo.
-  llm/             Chat message helpers.
+  llm/             Chat message helpers and the streaming think-tag filter.
   providers/       LiteLLM client and setup (the only place LiteLLM is used).
   sessions/        Per-chat JSON Lines storage.
   agent/           The agent loop and the system prompt.
-  ui/              Rich rendering, the approval prompt, and the REPL.
+  ui/              Rich rendering, the approval prompt, the REPL, and the
+                   broadcasting renderer plus interruptible prompt for remote.
   cli.py           The command-line entry point.
 ```
 

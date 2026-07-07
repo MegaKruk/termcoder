@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "termcoder"
-version = "0.6.2"
+version = "0.7.0"
 description = "Privacy-first, terminal-native agentic coding assistant."
 readme = "README.md"
 requires-python = ">=3.14"
@@ -41,6 +41,11 @@ tokenizers = ["tiktoken>=0.7"]
 # never leaves the machine. Without this extra, semantic search stays off and
 # the rest of termcoder is unaffected.
 semantic = ["lancedb>=0.13", "pyarrow>=15"]
+# Optional: LAN remote control. Starts a small local web server so a phone on
+# the same network can watch the session, send messages, and answer approval
+# prompts. Without this extra, the --remote flag reports that the dependencies
+# are missing and the rest of termcoder is unaffected.
+remote = ["starlette>=0.37", "uvicorn>=0.27", "websockets>=12"]
 
 [project.scripts]
 termcoder = "termcoder.cli:app"

@@ -8,6 +8,7 @@ literally and never parsed as markup.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 from rich.console import Console
@@ -53,13 +54,39 @@ def _format_scope(stats: UsageStats) -> str:
     return text
 
 
+def usage_line(turn: UsageStats, session: UsageStats) -> str:
+    """Build the one-line usage readout shown after a turn."""
+    line = (
+        f"[usage] turn: {turn.calls} call(s), {_format_scope(turn)}; "
+        f"session: {_format_scope(session)}"
+    )
+    if session.cost_usd > 0:
+        line += f" (~{_format_cost(session.cost_usd)})"
+    return line
+
+
+def compacted_line(result: CompactionResult) -> str:
+    """Build the one-line note shown when the conversation is compacted."""
+    return (
+        f"[context] compacted {result.summarized_turns} earlier turn(s), "
+        f"about {result.before_tokens} -> {result.after_tokens} tokens."
+    )
+
+
 class Renderer:
     """Render assistant output, tool activity and approval prompts."""
 
-    def __init__(self, console: Console | None = None):
+    def __init__(
+        self,
+        console: Console | None = None,
+        thinking_visible: Callable[[], bool] | None = None,
+    ):
         self._console = console or Console()
         self._label_pending = False
         self._streamed = False
+        self._thinking_visible = thinking_visible
+        self._thinking_label_pending = False
+        self._thinking_streamed = False
 
     @property
     def console(self) -> Console:
@@ -96,24 +123,54 @@ class Renderer:
         self._console.print(f"  {text}", style="dim")
 
     def begin_assistant(self) -> None:
-        """Prepare for assistant output. The label is printed lazily."""
+        """Prepare for assistant output. Labels are printed lazily."""
         self._label_pending = True
         self._streamed = False
+        self._thinking_label_pending = True
+        self._thinking_streamed = False
 
     def stream_assistant(self, text: str) -> None:
         """Print a streamed token from the assistant."""
         if self._label_pending:
+            self._close_thinking_block()
             self._console.print("assistant>", style="bold green")
             self._label_pending = False
         self._streamed = True
         self._console.print(text, end="", markup=False, highlight=False, soft_wrap=True)
 
+    def stream_thinking(self, text: str) -> None:
+        """Print a streamed reasoning token, when reasoning display is enabled.
+
+        Reasoning is hidden by default so the terminal looks exactly as before.
+        When the session toggle enables it, the reasoning streams in dim text
+        under its own label, which reassures the user that a slow local model
+        is working rather than hung.
+        """
+        if self._thinking_visible is None or not self._thinking_visible():
+            return
+        if self._thinking_label_pending:
+            self._console.print("thinking>", style="dim italic")
+            self._thinking_label_pending = False
+        self._thinking_streamed = True
+        self._console.print(
+            text, end="", style="dim", markup=False, highlight=False, soft_wrap=True
+        )
+
     def end_assistant(self) -> None:
         """Finish an assistant turn, adding a newline only if text was printed."""
+        if not self._streamed:
+            self._close_thinking_block()
         if self._streamed:
             self._console.print()
         self._label_pending = False
         self._streamed = False
+        self._thinking_label_pending = False
+
+    def _close_thinking_block(self) -> None:
+        """End a streamed reasoning block with a newline, once."""
+        if self._thinking_streamed:
+            self._console.print()
+            self._thinking_streamed = False
 
     def tool_started(self, name: str, raw_args: str) -> None:
         self._console.print(
@@ -127,22 +184,13 @@ class Renderer:
 
     def compacted(self, result: CompactionResult) -> None:
         """Note that the conversation was compacted to save context space."""
-        self._console.print(
-            f"  [context] compacted {result.summarized_turns} earlier turn(s), "
-            f"about {result.before_tokens} -> {result.after_tokens} tokens.",
-            style="dim",
-            markup=False,
-        )
+        self._console.print(f"  {compacted_line(result)}", style="dim", markup=False)
 
     def usage(self, turn: UsageStats, session: UsageStats) -> None:
         """Show a one-line token and cost readout after a turn."""
-        line = (
-            f"  [usage] turn: {turn.calls} call(s), {_format_scope(turn)}; "
-            f"session: {_format_scope(session)}"
+        self._console.print(
+            f"  {usage_line(turn, session)}", style="dim", markup=False
         )
-        if session.cost_usd > 0:
-            line += f" (~{_format_cost(session.cost_usd)})"
-        self._console.print(line, style="dim", markup=False)
 
     def usage_report(self, session: UsageStats) -> None:
         """Show the full session usage report for the /usage command."""

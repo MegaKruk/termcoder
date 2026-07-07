@@ -29,6 +29,9 @@ class RecordingUI:
     def stream_assistant(self, text):
         pass
 
+    def stream_thinking(self, text):
+        pass
+
     def end_assistant(self):
         pass
 
@@ -50,7 +53,7 @@ class ScriptedLLM:
     def __init__(self, replies):
         self._replies = list(replies)
 
-    def complete(self, messages, tools=None, on_text=None):
+    def complete(self, messages, tools=None, on_text=None, on_thinking=None):
         message = self._replies.pop(0)
         if on_text and message.content:
             on_text(message.content)

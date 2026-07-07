@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from .errors import ConfigError
@@ -31,7 +31,10 @@ class ModelConfig:
     ``"ollama_chat/llama3.1"``, ``"gpt-4o"`` or
     ``"claude-3-5-sonnet-20241022"``. ``api_key_env`` names an environment
     variable rather than holding a secret directly, so keys never live in
-    config files or memory dumps.
+    config files or memory dumps. ``reasoning_effort`` (one of "low", "medium"
+    or "high") asks a reasoning-capable cloud model to return its thinking;
+    leave it unset for models that emit reasoning on their own, such as local
+    Ollama reasoning models.
     """
 
     name: str
@@ -42,6 +45,7 @@ class ModelConfig:
     max_tokens: int | None = None
     context_window: int | None = None
     cache_prompts: bool = True
+    reasoning_effort: str | None = None
 
     def resolve_api_key(self) -> str | None:
         """Return the API key from the configured environment variable, if any."""
@@ -50,8 +54,19 @@ class ModelConfig:
         return os.environ.get(self.api_key_env)
 
     def to_completion_kwargs(self) -> dict:
-        """Build the keyword arguments passed to the LiteLLM completion call."""
-        kwargs: dict = {"model": self.model, "temperature": self.temperature}
+        """Build the keyword arguments passed to the LiteLLM completion call.
+
+        When ``reasoning_effort`` is set, the request opts in to provider
+        reasoning and ``temperature`` is omitted, since reasoning models either
+        reject a custom temperature or require it left at the default. LiteLLM
+        maps ``reasoning_effort`` to each provider (for example an Anthropic
+        thinking budget) and surfaces the reasoning as ``reasoning_content``.
+        """
+        kwargs: dict = {"model": self.model}
+        if self.reasoning_effort:
+            kwargs["reasoning_effort"] = self.reasoning_effort
+        else:
+            kwargs["temperature"] = self.temperature
         if self.max_tokens is not None:
             kwargs["max_tokens"] = self.max_tokens
         if self.api_base:
@@ -173,6 +188,23 @@ class SemanticSearchSettings:
 
 
 @dataclass(frozen=True)
+class RemoteSettings:
+    """Settings for the optional LAN remote control server.
+
+    Off by default. When enabled (in config or with the --remote flag), the
+    session starts a small web server so a phone on the same network can watch
+    the session, send messages, and answer approvals. An empty token means a
+    fresh random one is generated for each session; setting a fixed token keeps
+    the phone URL stable across sessions at the cost of reusing a secret.
+    """
+
+    enabled: bool = False
+    host: str = "0.0.0.0"
+    port: int = 8642
+    token: str = ""
+
+
+@dataclass(frozen=True)
 class MCPServerConfig:
     """Connection settings for a single MCP server (stdio transport).
 
@@ -204,6 +236,7 @@ class AppConfig:
     allow_run_command: bool = True
     enable_undo: bool = True
     show_usage: bool = True
+    show_thinking: bool = False
     sandbox: SandboxSettings = field(default_factory=SandboxSettings)
     context: ContextSettings = field(default_factory=ContextSettings)
     repomap: RepoMapSettings = field(default_factory=RepoMapSettings)
@@ -214,6 +247,7 @@ class AppConfig:
         default_factory=SemanticSearchSettings
     )
     mcp_servers: tuple[MCPServerConfig, ...] = ()
+    remote: RemoteSettings = field(default_factory=RemoteSettings)
 
     def model(self) -> ModelConfig:
         """Return the currently selected model configuration."""
@@ -233,25 +267,7 @@ class AppConfig:
             raise ConfigError(
                 f"Unknown model '{name}'. Available models: {available}."
             )
-        return AppConfig(
-            workspace=self.workspace,
-            config_dir=self.config_dir,
-            active_model=name,
-            models=self.models,
-            stream=self.stream,
-            max_tool_iterations=self.max_tool_iterations,
-            allow_run_command=self.allow_run_command,
-            enable_undo=self.enable_undo,
-            show_usage=self.show_usage,
-            sandbox=self.sandbox,
-            context=self.context,
-            repomap=self.repomap,
-            memory=self.memory,
-            web_search=self.web_search,
-            skills=self.skills,
-            semantic_search=self.semantic_search,
-            mcp_servers=self.mcp_servers,
-        )
+        return replace(self, active_model=name)
 
     @property
     def sessions_dir(self) -> Path:
@@ -317,6 +333,7 @@ def _model_from_toml(name: str, raw: dict, fallback: ModelConfig | None) -> Mode
         max_tokens=raw.get("max_tokens", base.max_tokens),
         context_window=raw.get("context_window", base.context_window),
         cache_prompts=bool(raw.get("cache_prompts", base.cache_prompts)),
+        reasoning_effort=raw.get("reasoning_effort", base.reasoning_effort),
     )
 
 
@@ -403,6 +420,15 @@ def _semantic_search_from_toml(raw: dict) -> SemanticSearchSettings:
     )
 
 
+def _remote_from_toml(raw: dict) -> RemoteSettings:
+    return RemoteSettings(
+        enabled=bool(raw.get("enabled", False)),
+        host=str(raw.get("host", "0.0.0.0")),
+        port=int(raw.get("port", 8642)),
+        token=str(raw.get("token", "")),
+    )
+
+
 def _mcp_servers_from_toml(raw: object) -> tuple[MCPServerConfig, ...]:
     """Build MCP server configs from a list of TOML tables.
 
@@ -480,6 +506,7 @@ def load_config(workspace: Path, model_override: str | None = None) -> AppConfig
         allow_run_command=bool(data.get("allow_run_command", True)),
         enable_undo=bool(data.get("enable_undo", True)),
         show_usage=bool(data.get("show_usage", True)),
+        show_thinking=bool(data.get("show_thinking", False)),
         sandbox=_sandbox_from_toml(data.get("sandbox") or {}),
         context=_context_from_toml(data.get("context") or {}),
         repomap=_repomap_from_toml(data.get("repomap") or {}),
@@ -488,4 +515,5 @@ def load_config(workspace: Path, model_override: str | None = None) -> AppConfig
         skills=_skills_from_toml(data.get("skills") or {}),
         semantic_search=_semantic_search_from_toml(data.get("semantic_search") or {}),
         mcp_servers=_mcp_servers_from_toml(data.get("mcp_servers")),
+        remote=_remote_from_toml(data.get("remote") or {}),
     )
