@@ -9,6 +9,7 @@ so the tool works without any cloud API key.
 from __future__ import annotations
 
 import os
+import re
 import tomllib
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -21,6 +22,30 @@ SESSIONS_DIRNAME = "sessions"
 SNAPSHOTS_DIRNAME = "snapshots"
 CACHE_DIRNAME = "cache"
 HISTORY_FILENAME = "repl_history"
+
+# Matches the major version in a Gemini model string, for example the "3" in
+# "gemini/gemini-3.7-flash" or "vertex_ai/gemini-3-pro".
+_GEMINI_VERSION = re.compile(r"gemini-(\d+)")
+
+# From Gemini 3 onward, temperature, top_p and top_k are deprecated: they are
+# ignored today and scheduled for removal, and sending them makes the provider
+# log a deprecation warning on every single call.
+_GEMINI_SAMPLING_DEPRECATED_FROM = 3
+
+
+def _deprecates_sampling_params(model: str) -> bool:
+    """Whether this model's provider has deprecated sampling parameters.
+
+    Detected from the model string rather than configured, so a user pointing
+    termcoder at a new Gemini model gets clean requests without having to know
+    about the deprecation. Unrecognized models are assumed to accept sampling
+    parameters, which is the safe default: the worst case is the previous
+    behavior.
+    """
+    match = _GEMINI_VERSION.search(model.lower())
+    if match is None:
+        return False
+    return int(match.group(1)) >= _GEMINI_SAMPLING_DEPRECATED_FROM
 
 
 @dataclass(frozen=True)
@@ -35,13 +60,18 @@ class ModelConfig:
     or "high") asks a reasoning-capable cloud model to return its thinking;
     leave it unset for models that emit reasoning on their own, such as local
     Ollama reasoning models.
+
+    Setting ``temperature`` to nothing omits it from the request entirely.
+    That is the right choice for model families that no longer accept sampling
+    parameters; the Gemini 3 line is detected automatically, so it needs no
+    configuration.
     """
 
     name: str
     model: str
     api_base: str | None = None
     api_key_env: str | None = None
-    temperature: float = 0.2
+    temperature: float | None = 0.2
     max_tokens: int | None = None
     context_window: int | None = None
     cache_prompts: bool = True
@@ -52,6 +82,16 @@ class ModelConfig:
         if not self.api_key_env:
             return None
         return os.environ.get(self.api_key_env)
+
+    def sends_temperature(self) -> bool:
+        """Whether a temperature should be included in the request.
+
+        It is dropped when the model reasons instead of sampling, when the
+        user cleared it in config, or when the provider has deprecated it.
+        """
+        if self.reasoning_effort or self.temperature is None:
+            return False
+        return not _deprecates_sampling_params(self.model)
 
     def to_completion_kwargs(self) -> dict:
         """Build the keyword arguments passed to the LiteLLM completion call.
@@ -65,7 +105,7 @@ class ModelConfig:
         kwargs: dict = {"model": self.model}
         if self.reasoning_effort:
             kwargs["reasoning_effort"] = self.reasoning_effort
-        else:
+        if self.sends_temperature():
             kwargs["temperature"] = self.temperature
         if self.max_tokens is not None:
             kwargs["max_tokens"] = self.max_tokens

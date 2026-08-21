@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from termcoder.config import AppConfig, RemoteSettings, load_config
+from termcoder.config import AppConfig, ModelConfig, RemoteSettings, load_config
 
 
 def _write_config(root: Path, body: str) -> None:
@@ -77,3 +77,38 @@ def test_with_active_model_preserves_remote_and_thinking(tmp_path):
     assert copied.show_thinking is True
     assert copied.remote.enabled is True
     assert copied.remote.port == 9100
+
+
+def test_temperature_sent_for_ordinary_models():
+    config = ModelConfig(name="t", model="gpt-4o")
+    assert config.to_completion_kwargs()["temperature"] == 0.2
+
+
+def test_temperature_omitted_for_gemini_3_and_newer():
+    # Gemini 3+ deprecated sampling parameters; sending them makes the
+    # provider log a deprecation warning on every call.
+    for model in (
+        "gemini/gemini-3.7-flash",
+        "gemini/gemini-3.6-flash",
+        "vertex_ai/gemini-3-pro",
+        "gemini/gemini-4.0-ultra",
+    ):
+        kwargs = ModelConfig(name="t", model=model).to_completion_kwargs()
+        assert "temperature" not in kwargs, model
+
+
+def test_temperature_still_sent_for_gemini_2():
+    config = ModelConfig(name="t", model="gemini/gemini-2.5-pro")
+    assert config.to_completion_kwargs()["temperature"] == 0.2
+
+
+def test_temperature_can_be_cleared_explicitly():
+    config = ModelConfig(name="t", model="gpt-4o", temperature=None)
+    assert "temperature" not in config.to_completion_kwargs()
+
+
+def test_reasoning_effort_still_omits_temperature():
+    config = ModelConfig(name="t", model="gpt-4o", reasoning_effort="medium")
+    kwargs = config.to_completion_kwargs()
+    assert kwargs["reasoning_effort"] == "medium"
+    assert "temperature" not in kwargs
